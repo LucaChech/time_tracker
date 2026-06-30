@@ -1,0 +1,228 @@
+/* ============================================================
+   Luca Chech AI — "Kinetic Logic" Design System
+   colors_and_type.css
+
+   Single source of truth for color + type tokens.
+   Mirrors the Tailwind v4 @theme block used in the live Astro
+   site (src/styles/global.css), restated as plain CSS custom
+   properties so it can be dropped into any HTML artifact.
+
+   Fonts (Google Fonts):
+     Space Grotesk  — display / headline
+     Work Sans      — body + label
+   Add this <link> to any page that uses these vars:
+   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Work+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+   ============================================================ */
+
+:root {
+  /* ---------- PRIMARY · Electric Blue (the analytical voice) ---------- */
+  --primary: #0058bc;
+  --primary-container: #0070eb;
+  --primary-fixed: #d8e2ff;
+  --primary-fixed-dim: #adc6ff;
+  --on-primary: #ffffff;
+  --on-primary-container: #fefcff;
+  --on-primary-fixed: #001a41;
+  --on-primary-fixed-variant: #004493;
+
+  /* ---------- SECONDARY · Solar Orange (the human spark) ---------- */
+  --secondary: #8c5000;
+  --secondary-container: #fe9400;
+  --secondary-fixed: #ffdcbf;
+  --secondary-fixed-dim: #ffb874;
+  --on-secondary: #ffffff;
+  --on-secondary-container: #633700;
+  --on-secondary-fixed: #2d1600;
+  --on-secondary-fixed-variant: #6a3b00;
+
+  /* ---------- TERTIARY · Burnt Sienna (rare accent) ---------- */
+  --tertiary: #9e3d00;
+  --tertiary-container: #c64f00;
+  --tertiary-fixed: #ffdbcc;
+  --tertiary-fixed-dim: #ffb595;
+  --on-tertiary: #ffffff;
+  --on-tertiary-container: #fffbff;
+  --on-tertiary-fixed: #351000;
+  --on-tertiary-fixed-variant: #7c2e00;
+
+  /* ---------- SURFACES · warm-tinted neutrals (never flat gray) ---------- */
+  --surface: #f9f9f9;
+  --surface-bright: #f9f9f9;
+  --surface-dim: #dadada;
+  --surface-container: #eeeeee;
+  --surface-container-high: #e8e8e8;
+  --surface-container-highest: #e2e2e2;
+  --surface-container-low: #f3f3f3;
+  --surface-container-lowest: #ffffff;
+  --surface-tint: #005bc1;
+  --surface-variant: #e2e2e2;
+  --background: #f9f9f9;
+
+  --on-background: #1a1c1c;
+  --on-surface: #1a1c1c;
+  --on-surface-variant: #414755;
+
+  /* ---------- OUTLINES (use sparingly + low opacity — see "No-Line" rule) -- */
+  --outline: #717786;
+  --outline-variant: #c1c6d7;
+
+  /* ---------- ERROR (the only "alert" color — no green allowed) ---------- */
+  --error: #c0504c;
+  --error-container: #ffdad6;
+  --on-error: #ffffff;
+  --on-error-container: #93000a;
+
+  /* ---------- INVERSE (dark slabs) ---------- */
+  --inverse-surface: #2f3131;
+  --inverse-on-surface: #f1f1f1;
+  --inverse-primary: #adc6ff;
+
+  /* ============================================================
+     TYPOGRAPHY — base families
+     ============================================================ */
+  --font-headline: "Space Grotesk", system-ui, sans-serif;
+  --font-body: "Work Sans", system-ui, sans-serif;
+  --font-label: "Work Sans", system-ui, sans-serif;
+
+  /* ---------- Type scale (semantic) ----------
+     Display = Space Grotesk, tight leading, -2% tracking, bold.
+     Body    = Work Sans, airy leading, conversational.
+     Label   = Work Sans, all-caps, +5% tracking for action/status. */
+
+  --display-lg-size: 8rem;      /* hero narrative hook   */
+  --display-lg-line: 0.9;
+  --display-lg-weight: 700;
+  --display-lg-track: -0.04em;
+
+  --display-md-size: 4.5rem;    /* big section statement */
+  --display-md-line: 0.95;
+  --display-md-weight: 700;
+  --display-md-track: -0.03em;
+
+  --headline-lg-size: 3.75rem;  /* h2                    */
+  --headline-lg-line: 1.05;
+  --headline-lg-weight: 700;
+  --headline-lg-track: -0.02em;
+
+  --headline-md-size: 2.25rem;  /* h3 / card title       */
+  --headline-md-line: 1.1;
+  --headline-md-weight: 700;
+  --headline-md-track: -0.01em;
+
+  --title-size: 1.25rem;        /* h5 small title        */
+  --title-line: 1.2;
+  --title-weight: 700;
+
+  --body-lg-size: 1.25rem;      /* lead paragraph        */
+  --body-lg-line: 1.6;
+  --body-lg-weight: 400;
+
+  --body-md-size: 1rem;         /* default paragraph     */
+  --body-md-line: 1.6;
+  --body-md-weight: 400;
+
+  --body-sm-size: 0.875rem;     /* supporting copy       */
+  --body-sm-line: 1.55;
+
+  --label-size: 0.75rem;        /* uppercase status chip */
+  --label-line: 1;
+  --label-weight: 700;
+  --label-track: 0.18em;
+
+  /* ---------- Radii (ROUND_EIGHT scale and larger; never sharp) -------- */
+  --radius-button: 0.5rem;   /* ROUND_EIGHT — buttons      */
+  --radius-md: 1rem;
+  --radius-lg: 1.5rem;       /* cards inner padding rhythm */
+  --radius-xl: 2rem;         /* feature cards              */
+  --radius-2xl: 2.5rem;      /* large narrative cards      */
+  --radius-3xl: 3rem;        /* hero panels                */
+  --radius-pill: 9999px;     /* chips                      */
+
+  /* ---------- Elevation — "Solar Flare" ambient shadow (no flat drops) -- */
+  --shadow-ambient: 0 12px 32px -4px rgba(26, 28, 28, 0.06);
+  --shadow-card: 0 18px 40px -12px rgba(0, 88, 188, 0.12);
+  --shadow-energy: 0 18px 40px -8px rgba(254, 148, 0, 0.35);
+
+  /* ---------- Signature gradient (135°, primary → primary-container) ----- */
+  --kinetic-gradient: linear-gradient(135deg, #0058bc 0%, #004493 100%);
+}
+
+/* ============================================================
+   SEMANTIC ELEMENT DEFAULTS
+   Opt in by adding class="kl" to a container, or copy these
+   rules. Kept un-scoped-by-default-off so they never fight a
+   host page unexpectedly.
+   ============================================================ */
+.kl {
+  background: var(--surface);
+  color: var(--on-surface);
+  font-family: var(--font-body);
+  font-size: var(--body-md-size);
+  line-height: var(--body-md-line);
+}
+
+.kl h1,
+.kl .display-lg {
+  font-family: var(--font-headline);
+  font-size: var(--display-lg-size);
+  line-height: var(--display-lg-line);
+  font-weight: var(--display-lg-weight);
+  letter-spacing: var(--display-lg-track);
+  color: var(--on-surface);
+}
+
+.kl h2,
+.kl .headline-lg {
+  font-family: var(--font-headline);
+  font-size: var(--headline-lg-size);
+  line-height: var(--headline-lg-line);
+  font-weight: var(--headline-lg-weight);
+  letter-spacing: var(--headline-lg-track);
+}
+
+.kl h3,
+.kl .headline-md {
+  font-family: var(--font-headline);
+  font-size: var(--headline-md-size);
+  line-height: var(--headline-md-line);
+  font-weight: var(--headline-md-weight);
+  letter-spacing: var(--headline-md-track);
+}
+
+.kl h5,
+.kl .title {
+  font-family: var(--font-headline);
+  font-size: var(--title-size);
+  line-height: var(--title-line);
+  font-weight: var(--title-weight);
+}
+
+.kl p,
+.kl .body {
+  font-family: var(--font-body);
+  color: var(--on-surface-variant);
+}
+
+.kl .lead {
+  font-size: var(--body-lg-size);
+  line-height: var(--body-lg-line);
+}
+
+.kl .label {
+  font-family: var(--font-label);
+  font-size: var(--label-size);
+  line-height: var(--label-line);
+  font-weight: var(--label-weight);
+  letter-spacing: var(--label-track);
+  text-transform: uppercase;
+}
+
+/* Signature utilities used across the site */
+.kinetic-gradient {
+  background: var(--kinetic-gradient);
+}
+.grid-pattern {
+  background-image: radial-gradient(circle, var(--primary) 1px, transparent 1px);
+  background-size: 24px 24px;
+  opacity: 0.05;
+}
