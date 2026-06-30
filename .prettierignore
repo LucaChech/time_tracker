@@ -4,6 +4,8 @@ release
 TimeTracker-handoff
 package-lock.json
 pnpm-lock.yaml
-LICENSE.md
 tsconfig.json
 tsconfig.*.json
+# Markdown docs (charter, plan, spine, handoff) are hand-formatted prose with
+# intentional line breaks — keep `npm run format` from reflowing them.
+*.md
