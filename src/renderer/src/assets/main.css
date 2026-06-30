@@ -1,0 +1,199 @@
+/* Cadence — Stage 1 app-shell styles.
+   This is the scaffold shell, not the 3a UI (that is built pixel-faithfully in
+   Phase 3). Its job: prove the transparent frameless window renders a rounded
+   panel with no black corners, and that all three self-hosted fonts load. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  /* The window itself is transparent; the panel below is the only visible surface.
+     A transparent body is what makes the rounded corners read as transparent
+     (not black) on Windows. */
+  background: transparent;
+  font-family: var(--font-body);
+  color: var(--on-surface);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  user-select: none;
+  cursor: default;
+}
+
+.material-symbols-outlined {
+  /* opsz/FILL are tuned per-use in Phase 3; this is the base. */
+  font-variation-settings:
+    'FILL' 0,
+    'wght' 400,
+    'GRAD' 0,
+    'opsz' 24;
+}
+
+.app-shell {
+  /* A small transparent gutter so the ambient CSS shadow + 16px rounded corners
+     are visible against the transparent window. */
+  margin: 10px;
+  background: var(--surface);
+  border-radius: 16px;
+  box-shadow: var(--shadow-ambient);
+  border: 1px solid rgba(0, 0, 0, 0.04);
+  overflow: hidden;
+}
+
+/* ---- Title bar (44px) — app mark + name, window controls (wired in Phase 4) ---- */
+.titlebar {
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  -webkit-app-region: drag; /* the frameless window is draggable by its title bar */
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.brand-mark {
+  width: 19px;
+  height: 19px;
+  border-radius: 5px;
+  background: var(--primary);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.brand-mark .material-symbols-outlined {
+  font-size: 13px;
+  font-variation-settings:
+    'FILL' 1,
+    'wght' 400,
+    'GRAD' 0,
+    'opsz' 20;
+}
+
+.brand-name {
+  font-family: var(--font-headline);
+  font-weight: 600;
+  font-size: 12.5px;
+  letter-spacing: -0.01em;
+  color: #1a1a1f;
+}
+
+.window-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  -webkit-app-region: no-drag; /* buttons must remain clickable */
+}
+
+.window-controls button {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--on-surface-variant);
+  cursor: pointer;
+}
+
+.window-controls button:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.window-controls button.close:hover {
+  background: var(--error);
+  color: #fff;
+}
+
+.window-controls .material-symbols-outlined {
+  font-size: 18px;
+}
+
+/* ---- Body — Stage 1 status (replaced by the ACTIVE/PAUSED UI in Phase 3) ---- */
+.shell-body {
+  padding: 16px;
+}
+
+.shell-eyebrow {
+  font-family: var(--font-label);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(0, 0, 0, 0.4);
+  margin-bottom: 10px;
+}
+
+.shell-headline {
+  font-family: var(--font-headline);
+  font-weight: 700;
+  font-size: 18px;
+  letter-spacing: -0.01em;
+  color: #16161a;
+  margin: 0 0 4px;
+}
+
+.shell-sub {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--on-surface-variant);
+  margin: 0 0 14px;
+}
+
+.shell-meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.shell-meta dt {
+  color: rgba(0, 0, 0, 0.45);
+}
+
+.shell-meta dd {
+  margin: 0;
+  color: var(--on-surface);
+  font-variant-numeric: tabular-nums;
+}
+
+.shell-ok {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 16px;
+  padding: 6px 11px;
+  border-radius: 999px;
+  background: rgba(0, 88, 188, 0.09);
+  color: var(--primary);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.shell-ok .material-symbols-outlined {
+  font-size: 15px;
+  font-variation-settings:
+    'FILL' 1,
+    'wght' 500,
+    'GRAD' 0,
+    'opsz' 20;
+}

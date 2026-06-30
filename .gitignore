@@ -10,12 +10,15 @@ node_modules/
 .pnp.js
 
 # --- Build / packaged output ---
+# NOTE: electron-vite compiles to out/ and electron-builder packages to dist/ (and
+# release/). `build/` is NOT output here — it holds tracked source icon resources
+# (electron-builder buildResources), so it is deliberately not ignored.
 dist/
 dist-electron/
 out/
-build/
 release/
 *.local
+.eslintcache
 
 # --- Electron / runtime artifacts ---
 *.log
