@@ -24,6 +24,12 @@ project first.)*
   mission-critical.** It is built to run with minimal supervision from Luca — the plan front-loads
   every human-only input into Phase 0 so the rest can proceed autonomously.
 - It is its own sibling project under `AiConsultancy/`; the hub charter lives at `../manager/`.
+- **Source control:** this folder is its **own PUBLIC GitHub repo** — `LucaChech/time_tracker`
+  (branch `main`, remote `origin`). Commit + push as phases land. **Secret hygiene is load-bearing
+  because the repo is public:** the real ClickUp `pk_` token lives in `.env.local`, protected **only**
+  by `.gitignore` — never `git add -f` it, never paste the token into a tracked file, and when Phase 5
+  adds `safeStorage`, keep the raw token off disk/logs. Run the spine's secret sweep over the working
+  tree **and** git history before shipping.
 
 ## v0 scope (decided)
 - ✅ **ClickUp READ** — fetch ALL open tasks + subtasks across all spaces/lists into the **PAUSED**

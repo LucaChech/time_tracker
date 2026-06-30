@@ -69,10 +69,10 @@ delegation. (Charter: `CLAUDE.md`.)
   it must STAY that way. Never `git add -f` it, never paste the token into a tracked file, and when Phase 5
   adds `safeStorage`, keep the raw `pk_` off disk/logs (spine §Stage 5 secret sweep). Run the spine's
   end-of-build secret sweep against **working tree AND git history** before shipping.
-- **Stale note to fix (recommended, not yet done):** `CLAUDE.md` still says *"time_tracker/ is a plain
-  sibling folder (NOT its own git repo) — so .env.local here can't be accidentally committed"*. That is now
-  **false** (it IS a git repo, and public). Update that "Rooting note" so a future session isn't lulled into
-  thinking the token is unspillable — the only thing protecting it now is `.gitignore`.
+- **Source-control note — DONE this session.** `CLAUDE.md` now has a durable **Source control** bullet
+  (under "How to treat this project") stating the repo is public and that `.env.local` is protected only by
+  `.gitignore`. (The old "NOT its own git repo / can't be accidentally committed" wording only ever lived in
+  *this handoff*, not the charter; it's already corrected in the Pointers "Rooting note" below.)
 - **Do not re-litigate:** the plan's "Settled product decisions" block, the verification doctrine above,
   or the account identity (the `.ai` gmail alias is confirmed correct).
 - **Riskiest stage = Phase 2 (state engine):** the whole app is a projection of it; the dangerous bugs are
