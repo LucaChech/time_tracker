@@ -28,6 +28,18 @@ let mainWindow: BrowserWindow | null = null
 let smokeDone = false
 const rendererErrors: string[] = []
 
+// Only hand http(s) URLs to the OS shell — never file: or an OS-handler scheme,
+// which shell.openExternal would otherwise launch (a known Electron footgun). This
+// matters once ClickUp-derived strings (task names/URLs) start flowing through.
+function isSafeExternalUrl(url: string): boolean {
+  try {
+    const { protocol } = new URL(url)
+    return protocol === 'https:' || protocol === 'http:'
+  } catch {
+    return false
+  }
+}
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: FLYOUT_WIDTH,
@@ -69,10 +81,25 @@ function createWindow(): void {
     if (is.dev || SMOKE) mainWindow?.show()
   })
 
-  // External links open in the user's browser, never inside the app window.
-  mainWindow.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
+  // External links open in the user's browser, never inside the app window — and
+  // only if they're http(s); any other scheme is dropped, not handed to the shell.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isSafeExternalUrl(url)) shell.openExternal(url)
     return { action: 'deny' }
+  })
+
+  // Lock the top frame to the app's own content: nothing in v0 should navigate the
+  // main window off the bundled renderer (or the dev server). Block any cross-origin
+  // navigation so a stray link / location= can't defeat the local-content + CSP model.
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    try {
+      const current = mainWindow?.webContents.getURL()
+      if (current && new URL(url).origin !== new URL(current).origin) {
+        event.preventDefault()
+      }
+    } catch {
+      event.preventDefault()
+    }
   })
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
@@ -84,16 +111,13 @@ function createWindow(): void {
 
 function registerIpc(): void {
   ipcMain.handle(IpcChannels.ping, () => 'pong')
-  ipcMain.handle(
-    IpcChannels.getAppInfo,
-    (): AppInfo => ({
-      name: app.getName(),
-      version: app.getVersion(),
-      electron: process.versions.electron,
-      chrome: process.versions.chrome,
-      node: process.versions.node
-    })
-  )
+  ipcMain.handle(IpcChannels.getAppInfo, (): AppInfo => ({
+    name: app.getName(),
+    version: app.getVersion(),
+    electron: process.versions.electron,
+    chrome: process.versions.chrome,
+    node: process.versions.node
+  }))
 }
 
 function writeSmokeResult(ok: boolean, report: SmokeReport | null, screenshotPath: string): void {

@@ -41,6 +41,6 @@ linux:
 appImage:
   artifactName: ${name}-${version}.${ext}
 npmRebuild: false
-publish:
-  provider: generic
-  url: https://example.com/auto-updates
+# No auto-update in v0 — the electron-vite template's placeholder `publish` block
+# (a generic provider pointed at example.com) was removed so no attacker-pointable
+# update channel ships. Add a real provider here if/when auto-update lands.

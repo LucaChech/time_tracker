@@ -7,7 +7,9 @@ const REQUIRED_FONTS = ['Space Grotesk', 'Work Sans', 'Material Symbols Outlined
 const NODE_GLOBALS = ['require', 'process', 'module', 'global', 'Buffer', '__dirname']
 
 function Icon({ name, className }: { name: string; className?: string }): JSX.Element {
-  return <span className={`material-symbols-outlined${className ? ` ${className}` : ''}`}>{name}</span>
+  return (
+    <span className={`material-symbols-outlined${className ? ` ${className}` : ''}`}>{name}</span>
+  )
 }
 
 function App(): JSX.Element {
@@ -36,6 +38,12 @@ function App(): JSX.Element {
         const w = globalThis as unknown as Record<string, unknown>
         const nodeReach: Record<string, string> = {}
         for (const g of NODE_GLOBALS) nodeReach[g] = typeof w[g]
+        // Faces load lazily — a weight the shell never renders (e.g. Space Grotesk 400)
+        // is otherwise never fetched, so check() would report false for a font that IS
+        // bundled. load() forces the fetch from the local bundle and resolves once it's
+        // available, which is exactly what "self-hosted, offline" should prove.
+        await Promise.all(REQUIRED_FONTS.map((f) => document.fonts.load(`16px "${f}"`)))
+        if (!alive) return
         const fonts: Record<string, boolean> = {}
         for (const f of REQUIRED_FONTS) fonts[f] = document.fonts.check(`16px "${f}"`)
         const pong = await window.cadence.ping()
