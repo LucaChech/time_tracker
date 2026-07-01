@@ -125,7 +125,13 @@ function isTask(value: unknown): value is Task {
     (typeof t.code === 'string' || t.code === null) &&
     typeof t.color === 'string' &&
     typeof t.glyph === 'string' &&
-    (t.source === 'clickup' || t.source === 'manual')
+    (t.source === 'clickup' || t.source === 'manual') &&
+    // Optional Phase-5 filter metadata: validate WHEN present so a corrupt row
+    // can't feed a non-string status / a non-array assigneeIds to the filter (whose
+    // `.includes` would otherwise misbehave). Absent is fine (manual tasks).
+    (t.status === undefined || t.status === null || typeof t.status === 'string') &&
+    (t.assigneeIds === undefined ||
+      (Array.isArray(t.assigneeIds) && t.assigneeIds.every((a) => typeof a === 'string')))
   )
 }
 

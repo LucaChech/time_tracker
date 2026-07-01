@@ -41,6 +41,19 @@ export interface Task {
   /** Material Symbols glyph name. */
   glyph: string
   source: TaskSource
+  /**
+   * ClickUp status NAME (e.g. "to do", "in progress"); `null`/absent for manual
+   * tasks or when ClickUp returns none. Carried from the Phase-5 fetch purely so
+   * the view-only PAUSED filter can narrow on status — derivation never branches
+   * on it. Optional so manual tasks and pre-Phase-5 data stay valid.
+   */
+  status?: string | null
+  /**
+   * ClickUp assignee user ids, as STRINGS (the API returns numbers — normalized on
+   * fetch so they compare cleanly against the filter's string `currentUserId`).
+   * Absent/empty for manual tasks. Feeds only the "Assigned to me" filter.
+   */
+  assigneeIds?: readonly string[]
 }
 
 /** The three event kinds in the append-only worklog. `heartbeat` is global

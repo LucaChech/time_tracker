@@ -18,6 +18,7 @@ import type { EventSource, ManualTaskInput, StateSnapshot } from '@shared/types'
 import { CadenceEngine } from './engine'
 import { computeFlyoutPosition } from './window/position'
 import { formatTrayTooltip, shouldHideOnBlur } from './window/format'
+import { fetchCatalogue, resolveToken, CLICKUP_PALETTE } from './clickup'
 
 /**
  * Cadence main process.
@@ -76,11 +77,21 @@ const TRAYTEST = process.env.CADENCE_TRAYTEST === '1'
 const TRAYTEST_OUT = process.env.CADENCE_TRAYTEST_OUT
 const TRAYTEST_DIR = process.env.CADENCE_TRAYTEST_DIR
 
+// Stage-5a ClickUp read harness. When CADENCE_CLICKUPTEST=1 the app runs a
+// WINDOW-LESS check: it resolves the token (CLICKUP_TOKEN env, passed by the
+// script from .env.local), fetches the REAL catalogue via the client, feeds it
+// through engine.setCatalogue on an ISOLATED userData dir, and asserts the
+// catalogue/breadcrumbs/palette/dedupe/status+assignees + end-to-end snapshot,
+// then writes clickup-result.json and exits. Driven by scripts/clickup-verify.mjs.
+const CLICKUPTEST = process.env.CADENCE_CLICKUPTEST === '1'
+const CLICKUPTEST_OUT = process.env.CADENCE_CLICKUPTEST_OUT
+const CLICKUPTEST_DIR = process.env.CADENCE_CLICKUPTEST_DIR
+
 // Any automated harness. Harnesses run the unpackaged build via `electron .`, so
 // `is.dev` (= !app.isPackaged) is TRUE for them — but they must behave like the
 // shipped app (hidden start, hide-on-blur). `isDevMode` is the real "developer is
 // running `npm run dev`" flag: dev, and not under a harness.
-const HARNESS = SMOKE || IPCTEST || TRAYTEST
+const HARNESS = SMOKE || IPCTEST || TRAYTEST || CLICKUPTEST
 const isDevMode = is.dev && !HARNESS
 
 let mainWindow: BrowserWindow | null = null
@@ -431,6 +442,39 @@ function startTick(engine: CadenceEngine): void {
   }, 1000)
 }
 
+/**
+ * Stage-5a launch-time ClickUp read. Resolves the token, fetches the real
+ * catalogue once, feeds it to the engine, and pushes a fresh snapshot so the
+ * flyout renders live tasks. Deliberately MINIMAL and NON-FATAL: no token → log
+ * and skip (the cache-first launch, manual refresh, 100-req/min throttle, `429`
+ * backoff, and the "Connect ClickUp" prompt are Stage 5b); any fetch error is
+ * caught and logged, never crashing launch. The token is never logged. A refresh
+ * only replaces catalogue metadata — it never touches the worklog or intervals,
+ * so a running timer is undisturbed.
+ */
+async function refreshCatalogueOnLaunch(engine: CadenceEngine): Promise<void> {
+  const token = resolveToken(app.getAppPath())
+  if (!token) {
+    console.log(
+      '[cadence] no ClickUp token found — skipping catalogue fetch (connect flow: Stage 5b)'
+    )
+    return
+  }
+  try {
+    // The fetch also returns the authenticated user id (for the "Assigned to me"
+    // filter) — 5b captures it when it wires the filter; 5a only needs the tasks.
+    const { tasks } = await fetchCatalogue({ token })
+    engine.setCatalogue(tasks)
+    pushState(engine.getState())
+    console.log(`[cadence] ClickUp catalogue loaded: ${tasks.length} task(s)`)
+  } catch (err) {
+    // Non-fatal: keep whatever the engine already has (nothing, in 5a) and carry on.
+    // Retry/cache/backoff is Stage 5b. Log the message only — never the token.
+    const message = err instanceof Error ? err.message : String(err)
+    console.error(`[cadence] ClickUp catalogue fetch failed (resilience: Stage 5b): ${message}`)
+  }
+}
+
 /** Register auto-pause (suspend/lock) + graceful-quit auto-stop. `before-quit`
  *  stops every running timer so a graceful Quit records an accurate final span
  *  (closes the two Stage-3b-deferred items). Fires for every quit path that runs
@@ -728,6 +772,133 @@ function registerTrayVerify(engine: CadenceEngine): void {
   })
 }
 
+function writeClickUpResult(ok: boolean, results: VerifyResult[], error: string | null): void {
+  if (!CLICKUPTEST_OUT) return
+  mkdirSync(CLICKUPTEST_OUT, { recursive: true })
+  writeFileSync(
+    join(CLICKUPTEST_OUT, 'clickup-result.json'),
+    JSON.stringify({ ok, results, error }, null, 2)
+  )
+}
+
+/**
+ * Stage-5a ClickUp read verify (window-less). Fetches the REAL catalogue with the
+ * `.env.local` token, feeds it through the engine on an isolated userData dir, and
+ * asserts the Stage-5 contract on live data: a non-empty catalogue, well-formed
+ * rows (Space › List breadcrumb, deterministic palette color, code string|null,
+ * status, string assignee ids), id dedupe, per-list color consistency, a valid
+ * numeric currentUserId, and the end-to-end engine slice (setCatalogue → all rows
+ * paused in a fresh session). Writes clickup-result.json and exits 0/1.
+ */
+async function runClickUpVerify(): Promise<void> {
+  const results: VerifyResult[] = []
+  const A = (name: string, cond: boolean, detail: unknown = ''): void => {
+    results.push({ name, pass: !!cond, detail: String(detail) })
+  }
+  try {
+    if (!CLICKUPTEST_DIR) {
+      writeClickUpResult(
+        false,
+        [],
+        'CADENCE_CLICKUPTEST_DIR not set — refusing to touch real userData'
+      )
+      app.exit(1)
+      return
+    }
+    app.setPath('userData', CLICKUPTEST_DIR)
+
+    const token = resolveToken(app.getAppPath())
+    A('token resolved (CLICKUP_TOKEN env / .env.local)', !!token, token ? 'present' : 'MISSING')
+    if (!token) throw new Error('no token available to the harness')
+
+    const { currentUserId: userId, tasks } = await fetchCatalogue({ token })
+
+    A('currentUserId is a non-empty numeric string', /^[0-9]+$/.test(userId), userId)
+    A('catalogue is non-empty (workspace has tasks)', tasks.length > 0, tasks.length)
+
+    const palette = new Set<string>(CLICKUP_PALETTE)
+    const wellFormed = tasks.every(
+      (t) =>
+        typeof t.id === 'string' &&
+        t.id.length > 0 &&
+        typeof t.name === 'string' &&
+        t.name.length > 0 &&
+        typeof t.space === 'string' &&
+        t.space.length > 0 &&
+        t.space !== 'hidden' && // never the synthetic folderless-list folder name
+        typeof t.list === 'string' &&
+        t.list.length > 0 &&
+        t.list !== 'hidden' &&
+        (t.code === null || typeof t.code === 'string') &&
+        palette.has(t.color) &&
+        t.source === 'clickup' &&
+        (t.status === null || typeof t.status === 'string') &&
+        Array.isArray(t.assigneeIds) &&
+        t.assigneeIds.every((a) => typeof a === 'string')
+    )
+    A('every row well-formed (breadcrumb, palette color, code, status, assignees)', wellFormed)
+
+    const nonNullCodes = tasks.filter((t) => t.code !== null).length
+    A(
+      'every code is null or a string (custom_id mapping; Free plan → typically null)',
+      tasks.every((t) => t.code === null || typeof t.code === 'string'),
+      `${nonNullCodes} non-null of ${tasks.length}`
+    )
+
+    const ids = tasks.map((t) => t.id)
+    A(
+      'task ids are unique (deduped, first-breadcrumb-wins)',
+      new Set(ids).size === ids.length,
+      ids.length
+    )
+
+    // Per-list color determinism: every task sharing a Space › List breadcrumb must
+    // share one color (same list-id → same hashed palette color).
+    const colorByList = new Map<string, string>()
+    let colorConsistent = true
+    for (const t of tasks) {
+      const key = `${t.space} ${t.list}`
+      const prior = colorByList.get(key)
+      if (prior === undefined) colorByList.set(key, t.color)
+      else if (prior !== t.color) colorConsistent = false
+    }
+    A(
+      'color is deterministic per list (same breadcrumb → same color)',
+      colorConsistent,
+      `${colorByList.size} lists`
+    )
+
+    // End-to-end: the fetched catalogue reaches the engine and renders as a fresh
+    // session (everything paused, nothing running), carrying metadata through.
+    const engine = CadenceEngine.create({ dir: CLICKUPTEST_DIR, now: Date.now })
+    engine.setCatalogue(tasks)
+    const snap = engine.getState()
+    A(
+      'engine.setCatalogue → all paused, none active (fresh session)',
+      snap.active.length === 0 && snap.paused.length === tasks.length,
+      `${snap.active.length} active / ${snap.paused.length} paused`
+    )
+    A('pausedCount == catalogue size', snap.pausedCount === tasks.length, snap.pausedCount)
+    const row = snap.paused[0]
+    A(
+      'snapshot row carries breadcrumb + filter metadata through',
+      !!row &&
+        typeof row.space === 'string' &&
+        palette.has(row.color) &&
+        Array.isArray(row.assigneeIds),
+      row ? `${row.space} › ${row.list}` : 'no rows'
+    )
+
+    const ok = results.every((r) => r.pass)
+    writeClickUpResult(ok, results, null)
+    app.exit(ok ? 0 : 1)
+  } catch (err) {
+    A('fetch/verify threw', false, err instanceof Error ? err.message : String(err))
+    writeClickUpResult(false, results, err instanceof Error ? err.message : String(err))
+    app.exit(1)
+  }
+}
+
 // Single-instance lock: the flyout is hidden by default, so a second launch must
 // SHOW + reposition the existing window (not merely focus an invisible one) — or,
 // if it raced in before the window exists, mark it for reveal on ready-to-show.
@@ -747,6 +918,14 @@ app.whenReady().then(() => {
   if (!gotSingleInstanceLock) return
 
   electronApp.setAppUserModelId('com.lucachech.cadence')
+
+  // Stage-5a ClickUp read harness: a window-less check that fetches the real
+  // catalogue, runs it through the engine, asserts, and exits. Handled first so it
+  // never spins up the tray/window/live fetch of a normal run.
+  if (CLICKUPTEST) {
+    void runClickUpVerify()
+    return
+  }
 
   // Both integration harnesses run on an ISOLATED userData dir so they never read
   // or pollute the real worklog. Fail closed if the isolation dir is missing rather
@@ -799,6 +978,13 @@ app.whenReady().then(() => {
     // Autostart only in the shipped app — a dev/`electron .` run shouldn't register
     // itself for login. The tray harness drives applyAutostart explicitly instead.
     if (app.isPackaged) applyAutostart(true)
+  }
+
+  // Stage-5a: fetch the real ClickUp catalogue once on launch (non-fatal, no token
+  // → skip). Skipped under every harness — CLICKUPTEST returns early above, and the
+  // smoke/ipc/tray harnesses must not make network calls or reshape their fixtures.
+  if (!HARNESS) {
+    void refreshCatalogueOnLaunch(engine)
   }
 
   registerIpcVerify()
