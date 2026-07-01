@@ -1,9 +1,20 @@
 import { useCallback, useEffect, useRef, useState, type JSX } from 'react'
 import type { CadenceApi, SmokeReport } from '@shared/ipc'
-import type { StateSnapshot } from '@shared/types'
+import type { CatalogueMeta, StateSnapshot } from '@shared/types'
 import { Flyout } from './flyout/Flyout'
+import { DEFAULT_META } from './flyout/connect'
 import type { ManualDraft } from './flyout/Composer'
 import { getScenario } from './flyout/fixtures'
+
+/** Meta shown before the first push resolves (bridge present): we have a token
+ *  question outstanding, so "connecting" — not the connect prompt, not "connected". */
+const PENDING_META: CatalogueMeta = {
+  status: 'connecting',
+  currentUserId: null,
+  refreshedAt: null,
+  hasToken: false,
+  encryptionAvailable: false
+}
 
 /**
  * The typed IPC bridge, or `undefined` when running outside Electron — a plain
@@ -50,6 +61,14 @@ function App(): JSX.Element {
   const [snapshot, setSnapshot] = useState<StateSnapshot | null>(() =>
     bridge() ? null : getScenario(params.scenario)
   )
+
+  // Stage 5b: the ClickUp connection meta (footer status, filter user id, connect
+  // prompt). Live under Electron; a connected default in a plain browser tab so the
+  // static render never shows the connect prompt. `connectOpen` is the tray "Connect
+  // ClickUp…" trigger. `now` drives the "refreshed Xm ago" label, bumped slowly.
+  const [meta, setMeta] = useState<CatalogueMeta>(() => (bridge() ? PENDING_META : DEFAULT_META))
+  const [connectOpen, setConnectOpen] = useState(false)
+  const [now, setNow] = useState(() => Date.now())
 
   // Snapshots are monotonic in `derivedAt`; drop any that is older than the last
   // one applied, so a slow operation reply resolving after a newer tick push can
@@ -113,6 +132,34 @@ function App(): JSX.Element {
       unsubscribe()
     }
   }, [applySnapshot, onOpError])
+
+  // Stage 5b: connection meta — initial fetch + subscribe to pushed transitions
+  // (connecting → connected/partial/offline/invalid-token), plus the tray "Connect
+  // ClickUp…" signal that reveals the token field even when already connected.
+  useEffect(() => {
+    const api = bridge()
+    if (!api) return
+    let alive = true
+    api
+      .getCatalogueMeta()
+      .then((m) => {
+        if (alive) setMeta(m)
+      })
+      .catch(onOpError)
+    const offMeta = api.onCatalogueMeta((m) => alive && setMeta(m))
+    const offOpen = api.onOpenConnect(() => alive && setConnectOpen(true))
+    return () => {
+      alive = false
+      offMeta()
+      offOpen()
+    }
+  }, [onOpError])
+
+  // Keep the "refreshed Xm ago" label roughly current without a per-second tick.
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 30_000)
+    return () => clearInterval(id)
+  }, [])
 
   // Content-driven window sizing (Phase 4): report the panel's natural height to
   // main, which sizes the transparent window to fit and clamps to the work area
@@ -195,6 +242,20 @@ function App(): JSX.Element {
     bridge()?.close()
   }, [])
 
+  // Stage 5b: manual refresh + connect. Each resolves with the immediate meta
+  // (usually "connecting"); the fetch result arrives via the meta subscription.
+  const onRefresh = useCallback(() => {
+    void bridge()?.refreshCatalogue()?.then(setMeta).catch(onOpError)
+  }, [onOpError])
+  const onConnect = useCallback(
+    (token: string) => {
+      setConnectOpen(false) // collapse on submit; reappears if the token is rejected
+      void bridge()?.setClickUpToken(token)?.then(setMeta).catch(onOpError)
+    },
+    [onOpError]
+  )
+  const onDismissConnect = useCallback(() => setConnectOpen(false), [])
+
   // Nothing to render until the first snapshot arrives (a single frame; the
   // window is hidden until ready-to-show in production).
   if (!snapshot) return <div className="stage" />
@@ -202,6 +263,9 @@ function App(): JSX.Element {
   return (
     <Flyout
       snapshot={snapshot}
+      meta={meta}
+      now={now}
+      connectOpen={connectOpen}
       initialPanel={params.panel ?? 'none'}
       onPlay={onPlay}
       onPause={onPause}
@@ -209,6 +273,9 @@ function App(): JSX.Element {
       onAddManual={onAddManual}
       onMinimize={onMinimize}
       onClose={onClose}
+      onRefresh={onRefresh}
+      onConnect={onConnect}
+      onDismissConnect={onDismissConnect}
     />
   )
 }

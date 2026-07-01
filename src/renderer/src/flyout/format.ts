@@ -35,6 +35,24 @@ export function fmtHM(ms: number): string {
   return h > 0 ? `${h}h ${pad2(m)}m` : `${m}m`
 }
 
+/**
+ * Relative "last refreshed" label for the footer (Stage 5b), from the last
+ * successful-fetch timestamp and the current time. `null` → "never". Coarse by
+ * design (just now / Xm / Xh / Xd) — it re-renders on a slow interval, so minute
+ * precision is plenty. Never negative (a future `refreshedAt` from a clock step
+ * reads as "just now").
+ */
+export function fmtRefreshedAgo(refreshedAt: number | null, now: number): string {
+  if (refreshedAt == null) return 'never'
+  const sec = Math.max(0, Math.floor((now - refreshedAt) / 1000))
+  if (sec < 45) return 'just now'
+  const min = Math.round(sec / 60)
+  if (min < 60) return `${min}m ago`
+  const hr = Math.round(min / 60)
+  if (hr < 24) return `${hr}h ago`
+  return `${Math.round(hr / 24)}d ago`
+}
+
 /** `#rrggbb` → `rgba(r,g,b,a)`. Prototype `rgba`. */
 export function rgba(hex: string, a: number): string {
   const n = parseInt(hex.slice(1), 16)

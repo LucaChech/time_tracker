@@ -4,14 +4,17 @@
  * temp dir), so this module never imports Electron and stays unit-testable with
  * a real filesystem.
  *
- * Two files (IMPLEMENTATION_PLAN.md Phase 2):
+ * Three files (IMPLEMENTATION_PLAN.md Phase 2 + Phase 5):
  *  - `worklog.jsonl` — append-only `start`/`stop`/`heartbeat` events, kept across
  *    sessions as history (the source of truth).
  *  - `tasks-store.json` — metadata snapshot of every task that is manual OR has
  *    ever been started, so a tracked task that later leaves the ClickUp catalogue
  *    still renders with its name/space/list/color.
- *
- * (`clickup-cache.json` is a Phase-5 concern and intentionally not here yet.)
+ *  - `clickup-cache.json` (Stage 5b) — the last GOOD full ClickUp catalogue
+ *    (`{ currentUserId, fetchedAt, tasks }`), so launch renders instantly from the
+ *    cache and then refreshes from the API, and an offline launch still shows the
+ *    last-known catalogue. It holds NO secrets (the token lives only in the
+ *    `safeStorage`-encrypted `clickup-token.enc`, written by `token-store.ts`).
  *
  * Reads are defensive: a malformed `worklog.jsonl` line is skipped (never
  * crashes, never yields NaN downstream) and a corrupt `tasks-store.json` is
@@ -32,6 +35,7 @@ import type { EventAction, EventSource, Task, WorklogEvent } from '@shared/types
 
 export const WORKLOG_FILE = 'worklog.jsonl'
 export const TASKS_STORE_FILE = 'tasks-store.json'
+export const CLICKUP_CACHE_FILE = 'clickup-cache.json'
 
 export function worklogPath(dir: string): string {
   return join(dir, WORKLOG_FILE)
@@ -39,6 +43,10 @@ export function worklogPath(dir: string): string {
 
 export function tasksStorePath(dir: string): string {
   return join(dir, TASKS_STORE_FILE)
+}
+
+export function clickupCachePath(dir: string): string {
+  return join(dir, CLICKUP_CACHE_FILE)
 }
 
 function ensureDir(dir: string): void {
@@ -155,4 +163,58 @@ export function writeTasksStore(dir: string, tasks: readonly Task[]): void {
   const tmp = path + '.tmp'
   writeFileSync(tmp, JSON.stringify(tasks, null, 2), 'utf8')
   renameSync(tmp, path) // libuv rename replaces an existing file on Windows + POSIX
+}
+
+// ── clickup-cache.json (Stage 5b: cache-first / offline launch) ───────────────
+
+/**
+ * The last good ClickUp catalogue on disk. Holds the fetched task rows plus the
+ * `currentUserId` (so the "Assigned to me" filter works offline, before the first
+ * refresh returns) and `fetchedAt` (epoch ms — drives the footer's "refreshed Xm
+ * ago"). Never holds the token: secrets live only in the encrypted token store.
+ */
+export interface ClickUpCache {
+  /** The authenticated user id when the catalogue was fetched (filter key). */
+  currentUserId: string | null
+  /** Epoch ms of the successful fetch this cache came from. */
+  fetchedAt: number
+  /** The catalogue rows. */
+  tasks: Task[]
+}
+
+/** Shape-guard the cache envelope, dropping malformed task rows (mirrors
+ *  `readTasksStore`) rather than failing the whole cache for one bad row. */
+function isClickUpCache(value: unknown): value is ClickUpCache {
+  if (typeof value !== 'object' || value === null) return false
+  const c = value as Record<string, unknown>
+  return (
+    (c.currentUserId === null || typeof c.currentUserId === 'string') &&
+    typeof c.fetchedAt === 'number' &&
+    Number.isFinite(c.fetchedAt) &&
+    c.fetchedAt > 0 &&
+    Array.isArray(c.tasks)
+  )
+}
+
+/** Read the cached catalogue. Returns `null` when missing or corrupt; drops any
+ *  individual malformed task row from an otherwise-valid envelope. */
+export function readClickUpCache(dir: string): ClickUpCache | null {
+  const path = clickupCachePath(dir)
+  if (!existsSync(path)) return null
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    if (!isClickUpCache(parsed)) return null
+    return { ...parsed, tasks: parsed.tasks.filter(isTask) }
+  } catch {
+    return null
+  }
+}
+
+/** Atomically overwrite the cached catalogue (temp file + rename). */
+export function writeClickUpCache(dir: string, cache: ClickUpCache): void {
+  ensureDir(dir)
+  const path = clickupCachePath(dir)
+  const tmp = path + '.tmp'
+  writeFileSync(tmp, JSON.stringify(cache, null, 2), 'utf8')
+  renameSync(tmp, path)
 }

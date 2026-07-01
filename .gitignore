@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 *.pem
+# safeStorage-encrypted token blobs (belt-and-suspenders: these only ever live in
+# userData, but never let one land in the tree — e.g. clickup-token.enc).
+*.enc
 
 # --- Dependencies ---
 node_modules/

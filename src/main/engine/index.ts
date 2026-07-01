@@ -8,9 +8,14 @@ export {
   appendEvent,
   readTasksStore,
   writeTasksStore,
+  readClickUpCache,
+  writeClickUpCache,
   parseEventLine,
   worklogPath,
   tasksStorePath,
+  clickupCachePath,
   WORKLOG_FILE,
-  TASKS_STORE_FILE
+  TASKS_STORE_FILE,
+  CLICKUP_CACHE_FILE
 } from './store'
+export type { ClickUpCache } from './store'

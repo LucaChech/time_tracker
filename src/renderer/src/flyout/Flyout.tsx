@@ -1,52 +1,85 @@
-import { useState, type JSX } from 'react'
-import type { StateSnapshot } from '@shared/types'
+import { useMemo, useState, type JSX } from 'react'
+import type { CatalogueMeta, StateSnapshot } from '@shared/types'
 import { Icon } from './Icon'
 import { ActiveCard } from './ActiveCard'
 import { PausedRow } from './PausedRow'
 import { Composer, type ManualDraft } from './Composer'
 import { FilterControl } from './FilterControl'
+import { ConnectPrompt } from './ConnectPrompt'
 import { applyPausedFilter, EMPTY_FILTER, type FilterState, isFilterActive } from './filter'
+import { DEFAULT_META, footerRefreshLabel, shouldShowConnectPrompt } from './connect'
 import { fmtHM } from './format'
 
 type InsetPanel = 'none' | 'composer' | 'filter'
 
 /**
- * The 3a tray flyout — a pure render of a `StateSnapshot` (the shape the engine's
- * getState() returns). Stage 3a is the static, pixel-faithful panel BEFORE it is
- * wired to the engine; operation handlers (start/stop/remove/add) are optional and
- * wired over IPC in Stage 3b. Only view state (which inset panel is open, the
- * filter selection) lives here — no business logic, no timing recompute.
+ * The 3a tray flyout — a pure render of a `StateSnapshot` plus the ClickUp
+ * connection `meta` (Stage 5b). It holds only view state (which inset panel is
+ * open, the filter selection): all timing/union/sort math is main's, and the
+ * connection state machine is main's — this projects them. Stage-5b additions: the
+ * PAUSED filter is threaded with the real `currentUserId`, the status chips come
+ * from the loaded catalogue, the footer shows the live refresh state, and a
+ * "Connect ClickUp" prompt appears when there is no usable token.
  */
 export function Flyout({
   snapshot,
+  meta = DEFAULT_META,
+  now = 0,
   initialPanel = 'none',
+  connectOpen = false,
   onMinimize,
   onClose,
   onPause,
   onPlay,
   onRemove,
-  onAddManual
+  onAddManual,
+  onRefresh,
+  onConnect,
+  onDismissConnect
 }: {
   snapshot: StateSnapshot
+  meta?: CatalogueMeta
+  /** Current time for the "refreshed Xm ago" label (passed in so the render stays
+   *  pure; the app bumps it on a slow interval). */
+  now?: number
   /** Which inset panel starts open — used to capture the composer/filter states. */
   initialPanel?: InsetPanel
+  /** Force the connect prompt open (tray "Connect ClickUp…") even when connected. */
+  connectOpen?: boolean
   onMinimize?: () => void
   onClose?: () => void
   onPause?: (id: string) => void
   onPlay?: (id: string) => void
   onRemove?: (id: string) => void
   onAddManual?: (draft: ManualDraft) => void
+  onRefresh?: () => void
+  onConnect?: (token: string) => void
+  onDismissConnect?: () => void
 }): JSX.Element {
   const [panel, setPanel] = useState<InsetPanel>(initialPanel)
   const [filter, setFilter] = useState<FilterState>(EMPTY_FILTER)
 
   const { active, paused, runningCount, pausedCount, sessionWorkedMs } = snapshot
 
-  // The filter is VIEW-ONLY: it narrows which paused rows render, and nothing
-  // else. ACTIVE is never filtered (a running task is always visible), and the
-  // "M idle" pill below keeps `pausedCount` (the full paused total), never this
-  // filtered length — so "247 idle" stays truthful while the list is narrowed.
-  const visiblePaused = applyPausedFilter(paused, filter)
+  // The filter is VIEW-ONLY: it narrows which paused rows render, and nothing else.
+  // ACTIVE is never filtered (a running task is always visible), and the "M idle"
+  // pill below keeps `pausedCount` (the full paused total), never this filtered
+  // length — so "247 idle" stays truthful while the list is narrowed. The current
+  // user id (Stage 5b) powers the "Assigned to me" predicate.
+  const visiblePaused = applyPausedFilter(paused, filter, meta.currentUserId)
+
+  // The workspace's actual statuses for the filter chips: the distinct, non-null
+  // statuses across everything we can show (pure projection of the snapshot).
+  const statusOptions = useMemo(() => {
+    const set = new Set<string>()
+    for (const row of [...active, ...paused]) if (row.status) set.add(row.status)
+    return [...set].sort((a, b) => a.localeCompare(b))
+  }, [active, paused])
+
+  const showConnect = connectOpen || shouldShowConnectPrompt(meta.status)
+  // A dismiss is offered only when the prompt was opened manually over a working
+  // token — when there's no usable token, it's the primary affordance, no backing out.
+  const connectDismiss = shouldShowConnectPrompt(meta.status) ? undefined : onDismissConnect
 
   return (
     <div className="stage">
@@ -82,6 +115,15 @@ export function Flyout({
             </div>
           </div>
 
+          {/* Connect ClickUp prompt (Stage 5b) — no usable token, or tray-triggered */}
+          {showConnect && (
+            <ConnectPrompt
+              meta={meta}
+              onConnect={onConnect ?? (() => {})}
+              onDismiss={connectDismiss}
+            />
+          )}
+
           {/* ACTIVE */}
           <div className="section-label">ACTIVE</div>
           {active.length > 0 ? (
@@ -105,15 +147,23 @@ export function Flyout({
           {panel === 'composer' && (
             <Composer onAdd={onAddManual} onCancel={() => setPanel('none')} />
           )}
-          {panel === 'filter' && <FilterControl value={filter} onChange={setFilter} />}
+          {panel === 'filter' && (
+            <FilterControl value={filter} onChange={setFilter} statusOptions={statusOptions} />
+          )}
         </div>
 
         {/* Footer: refresh status + filter (left), add untracked task (right) */}
         <div className="footer">
           <div className="footer-left">
-            <button type="button" className="footer-btn">
+            <button
+              type="button"
+              className={`footer-btn${meta.status === 'connecting' ? ' footer-btn--on' : ''}`}
+              disabled={meta.status === 'connecting'}
+              onClick={() => onRefresh?.()}
+              title="Refresh tasks from ClickUp"
+            >
               <Icon name="sync" />
-              Tasks refreshed 2m ago
+              {footerRefreshLabel(meta, now)}
             </button>
             <button
               type="button"

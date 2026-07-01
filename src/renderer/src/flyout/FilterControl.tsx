@@ -2,11 +2,11 @@ import type { JSX } from 'react'
 import { Icon } from './Icon'
 import type { FilterState } from './filter'
 
-// Representative statuses for the static UI. The real, workspace-specific status
-// set arrives with the ClickUp catalogue in Phase 5; the filter stays view-only
-// (it narrows the PAUSED list, never the fetch or persistence — wired in 3b).
-// No green anywhere — "Done" uses the neutral/blue chip like the rest.
-const STATUS_OPTIONS = ['To Do', 'In Progress', 'In Review', 'Blocked', 'Done']
+// Fallback statuses for the static UI / a not-yet-loaded catalogue. Stage 5b feeds
+// the real, workspace-specific status set (the distinct statuses of the loaded
+// tasks) via `statusOptions`. The filter stays view-only (it narrows the PAUSED
+// list, never the fetch or persistence). No green anywhere.
+const FALLBACK_STATUS_OPTIONS = ['To Do', 'In Progress', 'In Review', 'Blocked', 'Done']
 
 /**
  * Filter control — the one affordance `3a` lacks (IMPLEMENTATION_PLAN.md Phase 3).
@@ -15,11 +15,17 @@ const STATUS_OPTIONS = ['To Do', 'In Progress', 'In Review', 'Blocked', 'Done']
  */
 export function FilterControl({
   value,
-  onChange
+  onChange,
+  statusOptions
 }: {
   value: FilterState
   onChange: (next: FilterState) => void
+  /** The workspace's actual statuses (Stage 5b). Falls back to a representative
+   *  set when empty/absent (static UI, or before the catalogue loads). */
+  statusOptions?: readonly string[]
 }): JSX.Element {
+  const statuses =
+    statusOptions && statusOptions.length > 0 ? statusOptions : FALLBACK_STATUS_OPTIONS
   function toggleStatus(status: string): void {
     const has = value.statuses.includes(status)
     onChange({
@@ -50,7 +56,7 @@ export function FilterControl({
       <div className="filter-group">
         <div className="filter-group-label">Task status</div>
         <div className="chip-row">
-          {STATUS_OPTIONS.map((status) => {
+          {statuses.map((status) => {
             const on = value.statuses.includes(status)
             return (
               <button

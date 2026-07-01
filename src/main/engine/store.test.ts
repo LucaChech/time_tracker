@@ -10,12 +10,16 @@ import { join } from 'node:path'
 import type { Task, WorklogEvent } from '@shared/types'
 import {
   appendEvent,
+  clickupCachePath,
   parseEventLine,
+  readClickUpCache,
   readTasksStore,
   readWorklog,
   tasksStorePath,
   worklogPath,
-  writeTasksStore
+  writeClickUpCache,
+  writeTasksStore,
+  type ClickUpCache
 } from './store'
 
 let dir: string
@@ -160,5 +164,69 @@ describe('tasks-store read/write', () => {
       'utf8'
     )
     expect(readTasksStore(dir)).toEqual([sample[0]])
+  })
+})
+
+describe('clickup-cache read/write', () => {
+  const task: Task = {
+    id: 'ck1',
+    name: 'Cached task',
+    space: 'Space',
+    list: 'List',
+    code: null,
+    color: '#0058bc',
+    glyph: 'task_alt',
+    source: 'clickup',
+    status: 'to do',
+    assigneeIds: ['302553911']
+  }
+  const cache: ClickUpCache = {
+    currentUserId: '302553911',
+    fetchedAt: 1_700_000_000_000,
+    tasks: [task]
+  }
+
+  it('returns null when missing', () => {
+    expect(readClickUpCache(dir)).toBeNull()
+  })
+
+  it('round-trips an atomic write (currentUserId + fetchedAt + tasks)', () => {
+    writeClickUpCache(dir, cache)
+    expect(readClickUpCache(dir)).toEqual(cache)
+  })
+
+  it('preserves a null currentUserId', () => {
+    const noUser: ClickUpCache = { ...cache, currentUserId: null }
+    writeClickUpCache(dir, noUser)
+    expect(readClickUpCache(dir)?.currentUserId).toBeNull()
+  })
+
+  it('returns null for corrupt JSON rather than throwing', () => {
+    writeFileSync(clickupCachePath(dir), '{ not json', 'utf8')
+    expect(readClickUpCache(dir)).toBeNull()
+  })
+
+  it('returns null when fetchedAt is missing or non-positive (envelope invalid)', () => {
+    writeFileSync(clickupCachePath(dir), JSON.stringify({ currentUserId: 'u', tasks: [] }), 'utf8')
+    expect(readClickUpCache(dir)).toBeNull()
+    writeFileSync(
+      clickupCachePath(dir),
+      JSON.stringify({ currentUserId: 'u', fetchedAt: 0, tasks: [] }),
+      'utf8'
+    )
+    expect(readClickUpCache(dir)).toBeNull()
+  })
+
+  it('drops malformed task rows but keeps the good ones', () => {
+    writeFileSync(
+      clickupCachePath(dir),
+      JSON.stringify({
+        currentUserId: 'u',
+        fetchedAt: 1_700_000_000_000,
+        tasks: [task, { foo: 1 }, { ...task, id: 'bad', color: 42 }]
+      }),
+      'utf8'
+    )
+    expect(readClickUpCache(dir)?.tasks).toEqual([task])
   })
 })

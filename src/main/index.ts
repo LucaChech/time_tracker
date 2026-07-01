@@ -10,15 +10,29 @@ import {
   powerMonitor
 } from 'electron'
 import { join } from 'path'
-import { writeFileSync, mkdirSync } from 'fs'
+import { writeFileSync, mkdirSync, readFileSync, readdirSync } from 'fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { IpcChannels, type AppInfo, type SmokeReport } from '@shared/ipc'
-import type { EventSource, ManualTaskInput, StateSnapshot } from '@shared/types'
-import { CadenceEngine } from './engine'
+import type {
+  CatalogueMeta,
+  EventSource,
+  ManualTaskInput,
+  StateSnapshot,
+  Task
+} from '@shared/types'
+import { CadenceEngine, readClickUpCache, writeClickUpCache } from './engine'
 import { computeFlyoutPosition } from './window/position'
 import { formatTrayTooltip, shouldHideOnBlur } from './window/format'
-import { fetchCatalogue, resolveToken, CLICKUP_PALETTE } from './clickup'
+import { fetchCatalogue, resolveToken, CLICKUP_PALETTE, ClickUpApiError } from './clickup'
+import {
+  clearStoredToken,
+  hasStoredToken,
+  isEncryptionAvailable,
+  readStoredToken,
+  writeStoredToken,
+  TOKEN_FILE
+} from './token-store'
 
 /**
  * Cadence main process.
@@ -87,11 +101,21 @@ const CLICKUPTEST = process.env.CADENCE_CLICKUPTEST === '1'
 const CLICKUPTEST_OUT = process.env.CADENCE_CLICKUPTEST_OUT
 const CLICKUPTEST_DIR = process.env.CADENCE_CLICKUPTEST_DIR
 
+// Stage-5b token/connect harness. When CADENCE_TOKENTEST=1 the app runs a
+// WINDOW-LESS check on an ISOLATED userData dir (CADENCE_TOKENTEST_DIR): it exercises
+// the safeStorage token round-trip (raw token never on disk), the clear path, and
+// the connection state machine (connected / invalid-token / offline / no-token) via
+// an INJECTED fetch + isolated token source — no network, no real .env.local. Driven
+// by scripts/token-verify.mjs; writes token-result.json to CADENCE_TOKENTEST_OUT.
+const TOKENTEST = process.env.CADENCE_TOKENTEST === '1'
+const TOKENTEST_OUT = process.env.CADENCE_TOKENTEST_OUT
+const TOKENTEST_DIR = process.env.CADENCE_TOKENTEST_DIR
+
 // Any automated harness. Harnesses run the unpackaged build via `electron .`, so
 // `is.dev` (= !app.isPackaged) is TRUE for them — but they must behave like the
 // shipped app (hidden start, hide-on-blur). `isDevMode` is the real "developer is
 // running `npm run dev`" flag: dev, and not under a harness.
-const HARNESS = SMOKE || IPCTEST || TRAYTEST || CLICKUPTEST
+const HARNESS = SMOKE || IPCTEST || TRAYTEST || CLICKUPTEST || TOKENTEST
 const isDevMode = is.dev && !HARNESS
 
 let mainWindow: BrowserWindow | null = null
@@ -106,6 +130,27 @@ let smokeDone = false
 const rendererErrors: string[] = []
 // The 1s display-tick handle, cleared on quit so the interval never outlives the app.
 let tickTimer: ReturnType<typeof setInterval> | null = null
+
+// ── Stage 5b: ClickUp integration (connection) state ─────────────────────────
+// The live state of the external integration, pushed to the renderer on its own
+// channel (kept OUT of the engine snapshot, which stays a pure worklog projection).
+// Never holds the token — that lives only in the encrypted at-rest store.
+let catalogueMeta: CatalogueMeta = {
+  status: 'no-token',
+  currentUserId: null,
+  refreshedAt: null,
+  hasToken: false,
+  encryptionAvailable: false
+}
+// Collapses overlapping refresh triggers (launch + tray + footer) into one fetch.
+let refreshInFlight = false
+// Set when a refresh is requested WHILE one is in flight (e.g. a token pasted during
+// a launch fetch) — the in-flight refresh runs one trailing refresh so the new
+// token/state is never silently dropped.
+let refreshQueued = false
+// The last FULLY-successful catalogue, kept so a later PARTIAL refresh merges over it
+// (skipped-list tasks don't vanish) instead of replacing it with the incomplete set.
+let lastFullTasks: Task[] | null = null
 
 // Only hand http(s) URLs to the OS shell — never file: or an OS-handler scheme,
 // which shell.openExternal would otherwise launch (a known Electron footgun). This
@@ -228,6 +273,11 @@ function createTray(): void {
   const menu = Menu.buildFromTemplate([
     { label: 'Show / Hide Cadence', click: () => toggleFlyout() },
     { type: 'separator' },
+    // Stage 5b: manual metadata-only refresh (never touches intervals).
+    { label: 'Refresh tasks', click: () => engineRef && void refreshCatalogue(engineRef) },
+    // Reveal the token-entry field even when already connected (token rotation).
+    { label: 'Connect ClickUp…', click: () => openConnectPanel() },
+    { type: 'separator' },
     // Quit ends the session (before-quit stops running timers via engine.quit()).
     { label: 'Quit Cadence', click: () => app.quit() }
   ])
@@ -269,6 +319,15 @@ function toggleFlyout(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return
   if (mainWindow.isVisible()) hideFlyout()
   else showFlyout()
+}
+
+/** Tray "Connect ClickUp…": show the flyout and ask the renderer to reveal the
+ *  token-entry field (works whether or not a token is already connected). */
+function openConnectPanel(): void {
+  showFlyout()
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IpcChannels.openConnect)
+  }
 }
 
 /** Blur → hide, unless in dev or DevTools is focused (else dev is unusable).
@@ -442,37 +501,194 @@ function startTick(engine: CadenceEngine): void {
   }, 1000)
 }
 
+// ── Stage 5b: ClickUp connection state machine ───────────────────────────────
+
 /**
- * Stage-5a launch-time ClickUp read. Resolves the token, fetches the real
- * catalogue once, feeds it to the engine, and pushes a fresh snapshot so the
- * flyout renders live tasks. Deliberately MINIMAL and NON-FATAL: no token → log
- * and skip (the cache-first launch, manual refresh, 100-req/min throttle, `429`
- * backoff, and the "Connect ClickUp" prompt are Stage 5b); any fetch error is
- * caught and logged, never crashing launch. The token is never logged. A refresh
- * only replaces catalogue metadata — it never touches the worklog or intervals,
- * so a running timer is undisturbed.
+ * Resolve the active token. Precedence: the dev `.env.local` / `CLICKUP_TOKEN`
+ * env (via the pure {@link resolveToken}) first, then the `safeStorage`-encrypted
+ * at-rest store (the shipped app / in-app-entered token). Returns null when
+ * neither yields a token. The token is treated as opaque and never logged.
  */
-async function refreshCatalogueOnLaunch(engine: CadenceEngine): Promise<void> {
-  const token = resolveToken(app.getAppPath())
-  if (!token) {
-    console.log(
-      '[cadence] no ClickUp token found — skipping catalogue fetch (connect flow: Stage 5b)'
-    )
-    return
+function resolveActiveToken(envDir: string = app.getAppPath()): string | null {
+  return resolveToken(envDir) ?? readStoredToken()
+}
+
+/** Push the current meta to the renderer (no-op if the window is gone) + return it. */
+function pushCatalogueMeta(): CatalogueMeta {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IpcChannels.catalogueMetaUpdate, catalogueMeta)
   }
+  return catalogueMeta
+}
+
+/** Merge a patch into the connection meta and push it. */
+function setCatalogueMeta(patch: Partial<CatalogueMeta>): CatalogueMeta {
+  catalogueMeta = { ...catalogueMeta, ...patch }
+  return pushCatalogueMeta()
+}
+
+/** Seed the meta at launch from token presence + encryption availability, BEFORE
+ *  the first fetch — so the renderer shows "connecting" or the connect prompt
+ *  immediately rather than a blank/undefined state. */
+function initCatalogueMeta(): void {
+  const hasToken = resolveActiveToken() !== null
+  catalogueMeta = {
+    ...catalogueMeta,
+    hasToken,
+    encryptionAvailable: isEncryptionAvailable(),
+    status: hasToken ? 'connecting' : 'no-token'
+  }
+}
+
+/**
+ * Cache-first launch: load the last good catalogue from `clickup-cache.json` into
+ * the engine so the flyout renders instantly (and offline), before the network
+ * refresh returns. Metadata-only — never touches the worklog or intervals. Seeds
+ * the meta's `currentUserId` (for the filter) + `refreshedAt` (footer) from the
+ * cache so both work before the first live fetch completes.
+ */
+function loadCachedCatalogue(engine: CadenceEngine): void {
+  const cache = readClickUpCache(app.getPath('userData'))
+  if (!cache) return
+  engine.setCatalogue(cache.tasks)
+  // The cache is the last fully-successful catalogue — seed the merge base so a
+  // first refresh that comes back partial doesn't drop tasks it couldn't re-fetch.
+  lastFullTasks = cache.tasks
+  catalogueMeta = {
+    ...catalogueMeta,
+    currentUserId: cache.currentUserId,
+    refreshedAt: cache.fetchedAt
+  }
+  pushState(engine.getState())
+  pushCatalogueMeta()
+}
+
+/**
+ * Fetch the ClickUp catalogue and fold it into the engine — metadata-only, so it
+ * NEVER touches intervals or interrupts a running card (the engine's setCatalogue
+ * rewrites only the catalogue map + metadata snapshot). Drives the connection
+ * state machine and writes the cache on success:
+ *   no token   → 'no-token'   (connect prompt)
+ *   in flight  → 'connecting'
+ *   success    → 'connected' (or 'partial' when some spaces/lists were skipped)
+ *   auth 401/3 → 'invalid-token' (connect prompt; cached catalogue kept)
+ *   other fail → 'offline'       (cached catalogue kept)
+ * Non-fatal throughout: a failure never crashes and never clears the catalogue.
+ * Only a FULL success writes the cache + becomes the new merge base — a PARTIAL
+ * result is merged over the last-full set (so skipped-list tasks don't vanish) and
+ * does NOT clobber the last-good-full cache (which stays the offline snapshot).
+ * Concurrency-guarded so overlapping triggers collapse to one fetch; a request that
+ * arrives mid-flight (e.g. a token pasted during a launch fetch) queues exactly one
+ * trailing refresh so the new state is never dropped. The optional `fetchFn` /
+ * `envDir` let the verify harness inject a deterministic transport + token source.
+ */
+async function refreshCatalogue(
+  engine: CadenceEngine,
+  opts: { fetchFn?: typeof fetch; envDir?: string } = {}
+): Promise<CatalogueMeta> {
+  if (refreshInFlight) {
+    refreshQueued = true // run one trailing refresh when the in-flight one finishes
+    return catalogueMeta
+  }
+  const token = resolveActiveToken(opts.envDir)
+  if (!token) return setCatalogueMeta({ status: 'no-token', hasToken: false })
+
+  refreshInFlight = true
   try {
-    // The fetch also returns the authenticated user id (for the "Assigned to me"
-    // filter) — 5b captures it when it wires the filter; 5a only needs the tasks.
-    const { tasks } = await fetchCatalogue({ token })
+    // Inside the try so a throw from the push (window tearing down) still hits the
+    // `finally` that clears `refreshInFlight` — no permanently-stuck 'connecting'.
+    setCatalogueMeta({ status: 'connecting', hasToken: true })
+    const { currentUserId, tasks, partial } = await fetchCatalogue({ token, fetchFn: opts.fetchFn })
+
+    if (partial) {
+      // Partial = partial failure. Merge the fetched rows over the last-full set so
+      // tasks from skipped lists remain visible, and DON'T overwrite the good cache
+      // or advance `refreshedAt` (the offline snapshot stays the last FULL one).
+      const byId = new Map<string, Task>((lastFullTasks ?? []).map((t) => [t.id, t]))
+      for (const t of tasks) byId.set(t.id, t)
+      engine.setCatalogue([...byId.values()])
+      pushState(engine.getState())
+      console.log(`[cadence] ClickUp refresh partial — ${tasks.length} fetched, cache preserved`)
+      return setCatalogueMeta({
+        status: 'partial',
+        currentUserId: currentUserId || catalogueMeta.currentUserId,
+        hasToken: true
+      })
+    }
+
+    // Full success: this is the new last-good-full — replace, cache, become merge base.
+    lastFullTasks = [...tasks]
     engine.setCatalogue(tasks)
+    const fetchedAt = Date.now()
+    writeClickUpCache(app.getPath('userData'), {
+      currentUserId: currentUserId || null,
+      fetchedAt,
+      tasks
+    })
     pushState(engine.getState())
-    console.log(`[cadence] ClickUp catalogue loaded: ${tasks.length} task(s)`)
+    console.log(`[cadence] ClickUp catalogue refreshed: ${tasks.length} task(s)`)
+    return setCatalogueMeta({
+      status: 'connected',
+      currentUserId: currentUserId || null,
+      refreshedAt: fetchedAt,
+      hasToken: true
+    })
   } catch (err) {
-    // Non-fatal: keep whatever the engine already has (nothing, in 5a) and carry on.
-    // Retry/cache/backoff is Stage 5b. Log the message only — never the token.
+    // Distinguish a rejected token (→ re-prompt) from a network failure (→ keep
+    // showing the cache). Log the message only — the token is never in it.
+    const authRejected =
+      err instanceof ClickUpApiError && (err.status === 401 || err.status === 403)
     const message = err instanceof Error ? err.message : String(err)
-    console.error(`[cadence] ClickUp catalogue fetch failed (resilience: Stage 5b): ${message}`)
+    console.error(
+      `[cadence] ClickUp refresh failed (${authRejected ? 'auth' : 'network'}): ${message}`
+    )
+    return setCatalogueMeta({ status: authRejected ? 'invalid-token' : 'offline' })
+  } finally {
+    refreshInFlight = false
+    if (refreshQueued) {
+      refreshQueued = false
+      // A refresh (e.g. a freshly-pasted token) arrived mid-flight — run it now, with
+      // default deps (real transport + token source), never the harness's injected ones.
+      void refreshCatalogue(engine)
+    }
   }
+}
+
+/**
+ * Persist a pasted token (encrypted at rest via `safeStorage`) and kick off a
+ * refresh. Returns the immediate meta (usually `connecting`); the fetch result
+ * arrives via the meta push. A blank token or unavailable encryption writes
+ * nothing and reflects that so the connect UI can explain. The raw token is used
+ * in-process only and is never logged.
+ */
+function setClickUpToken(engine: CadenceEngine, raw: string): CatalogueMeta {
+  if (!writeStoredToken(raw)) {
+    // Blank token, or OS encryption unavailable (we refuse to persist in the clear).
+    return setCatalogueMeta({
+      status: 'no-token',
+      hasToken: hasStoredToken(),
+      encryptionAvailable: isEncryptionAvailable()
+    })
+  }
+  setCatalogueMeta({ hasToken: true, encryptionAvailable: isEncryptionAvailable() })
+  // Kick a refresh with the new token. If one is already in flight, this queues a
+  // trailing refresh (the guard in refreshCatalogue) so the new token is never dropped.
+  void refreshCatalogue(engine)
+  return catalogueMeta
+}
+
+/** Register the Stage-5b catalogue IPC. `refreshCatalogue`/`setClickUpToken` return
+ *  the IMMEDIATE meta (the async fetch pushes further transitions), so the renderer
+ *  never blocks on a multi-second network round-trip. */
+function registerCatalogueIpc(engine: CadenceEngine): void {
+  ipcMain.handle(IpcChannels.getCatalogueMeta, () => catalogueMeta)
+  ipcMain.handle(IpcChannels.refreshCatalogue, () => {
+    void refreshCatalogue(engine)
+    return catalogueMeta
+  })
+  ipcMain.handle(IpcChannels.setClickUpToken, (_e, token: unknown) =>
+    setClickUpToken(engine, typeof token === 'string' ? token : '')
+  )
 }
 
 /** Register auto-pause (suspend/lock) + graceful-quit auto-stop. `before-quit`
@@ -899,6 +1115,245 @@ async function runClickUpVerify(): Promise<void> {
   }
 }
 
+function writeTokenResult(ok: boolean, results: VerifyResult[], error: string | null): void {
+  if (!TOKENTEST_OUT) return
+  mkdirSync(TOKENTEST_OUT, { recursive: true })
+  writeFileSync(
+    join(TOKENTEST_OUT, 'token-result.json'),
+    JSON.stringify({ ok, results, error }, null, 2)
+  )
+}
+
+/**
+ * Stage-5b token / connect verify (window-less). Exercises the build's
+ * secret-at-rest boundary + the connection state machine WITHOUT the network or the
+ * real `.env.local`:
+ *  - safeStorage round-trip: a fake token encrypts, the RAW value is not present in
+ *    ANY userData file (the blob is ciphertext), and it decrypts back;
+ *  - clear removes it;
+ *  - the state machine, driven by an injected fetch + an isolated token source:
+ *    a fake success → 'connected' (+ user id captured + cache written), an injected
+ *    401 → 'invalid-token', a network throw → 'offline' (cache kept), no token →
+ *    'no-token'.
+ * The fake token is a fixed sentinel the orchestrator also greps the child's logs
+ * for — proving the raw token never reaches stdout/stderr. Writes token-result.json.
+ */
+async function runTokenVerify(): Promise<void> {
+  const results: VerifyResult[] = []
+  const A = (name: string, cond: boolean, detail: unknown = ''): void => {
+    results.push({ name, pass: !!cond, detail: String(detail) })
+  }
+  // A recognizable, obviously-fake token. The orchestrator asserts it never appears
+  // in the child's stdout/stderr; here we assert it never lands raw on disk. It
+  // deliberately does NOT start with `pk_` so a secret scanner can't false-positive
+  // on this tracked, public-repo test fixture.
+  const FAKE = 'FAKEtoken_verifyONLY_dontLog_9f8e7d6c5b4a'
+
+  try {
+    if (!TOKENTEST_DIR) {
+      writeTokenResult(false, [], 'CADENCE_TOKENTEST_DIR not set — refusing to touch real userData')
+      app.exit(1)
+      return
+    }
+    app.setPath('userData', TOKENTEST_DIR)
+    const userData = app.getPath('userData')
+
+    // Injected transports (no network). A minimal ClickUp catalogue for success.
+    const okFetch = (async (input: string) => {
+      const path = String(input).replace('https://api.clickup.com/api/v2', '')
+      const routes: Record<string, unknown> = {
+        '/user': { user: { id: 4242 } },
+        '/team': { teams: [{ id: 'T1' }] },
+        '/team/T1/space?archived=false': { spaces: [{ id: 'S1', name: 'Space' }] },
+        '/space/S1/folder?archived=false': { folders: [] },
+        '/space/S1/list?archived=false': { lists: [{ id: 'L1', name: 'List' }] }
+      }
+      if (path.startsWith('/list/L1/task')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            tasks: [
+              { id: 'tk1', name: 'A task', status: { status: 'to do' }, assignees: [{ id: 4242 }] }
+            ],
+            last_page: true
+          })
+        }
+      }
+      const body = routes[path]
+      return {
+        ok: body !== undefined,
+        status: body !== undefined ? 200 : 404,
+        json: async () => body ?? {}
+      }
+    }) as unknown as typeof fetch
+    const unauthorizedFetch = (async () => ({
+      ok: false,
+      status: 401,
+      json: async () => ({})
+    })) as unknown as typeof fetch
+    const networkErrorFetch = (async () => {
+      throw new Error('simulated network failure')
+    }) as unknown as typeof fetch
+    // Partial: L1 returns a NEW task (tk2); a second list L2 fails (500) → partial.
+    const partialFetch = (async (input: string) => {
+      const path = String(input).replace('https://api.clickup.com/api/v2', '')
+      const routes: Record<string, unknown> = {
+        '/user': { user: { id: 4242 } },
+        '/team': { teams: [{ id: 'T1' }] },
+        '/team/T1/space?archived=false': { spaces: [{ id: 'S1', name: 'Space' }] },
+        '/space/S1/folder?archived=false': { folders: [] },
+        '/space/S1/list?archived=false': {
+          lists: [
+            { id: 'L1', name: 'List' },
+            { id: 'L2', name: 'List Two' }
+          ]
+        }
+      }
+      if (path.startsWith('/list/L1/task')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            tasks: [{ id: 'tk2', name: 'New', assignees: [] }],
+            last_page: true
+          })
+        }
+      }
+      if (path.startsWith('/list/L2/task'))
+        return { ok: false, status: 500, json: async () => ({}) }
+      const body = routes[path]
+      return {
+        ok: body !== undefined,
+        status: body !== undefined ? 200 : 404,
+        json: async () => body ?? {}
+      }
+    }) as unknown as typeof fetch
+
+    const engine = CadenceEngine.create({ dir: userData, now: Date.now })
+
+    // 1) safeStorage availability (on the Windows build host: DPAPI → true).
+    const encAvailable = isEncryptionAvailable()
+    A('OS encryption (safeStorage/DPAPI) is available', encAvailable, String(encAvailable))
+    if (!encAvailable) throw new Error('safeStorage unavailable — cannot verify at-rest encryption')
+
+    // 2) Round-trip: write → present + decrypts back → raw NOT on disk anywhere.
+    A('writeStoredToken persists a token', writeStoredToken(FAKE) && hasStoredToken())
+    A('readStoredToken round-trips the exact token', readStoredToken() === FAKE)
+    const blob = readFileSync(join(userData, TOKEN_FILE))
+    A(
+      'the token blob is ciphertext (raw token NOT in the file)',
+      !blob.includes(FAKE),
+      `${blob.length} bytes`
+    )
+    // Scan EVERY userData file — the raw token must be nowhere on disk.
+    const rawOnDisk = readdirSync(userData).filter((f) => {
+      try {
+        return readFileSync(join(userData, f)).includes(FAKE)
+      } catch {
+        return false
+      }
+    })
+    A(
+      'raw token appears in NO userData file (grep userData)',
+      rawOnDisk.length === 0,
+      rawOnDisk.join(',')
+    )
+
+    // 3) State machine — driven by injected fetch + the isolated token source (the
+    //    stored FAKE token; envDir points at the token-less dir so no real .env.local
+    //    is read). A refresh here NEVER hits the network.
+    await refreshCatalogue(engine, { fetchFn: okFetch, envDir: userData })
+    A(
+      'injected success → status "connected"',
+      catalogueMeta.status === 'connected',
+      catalogueMeta.status
+    )
+    A(
+      'current user id captured from /user',
+      catalogueMeta.currentUserId === '4242',
+      String(catalogueMeta.currentUserId)
+    )
+    A('refreshedAt stamped on success', typeof catalogueMeta.refreshedAt === 'number')
+    A(
+      'catalogue reached the engine',
+      engine.getState().paused.some((t) => t.id === 'tk1')
+    )
+    const cache = readClickUpCache(userData)
+    A(
+      'success wrote clickup-cache.json (offline-safe)',
+      !!cache && cache.tasks.some((t) => t.id === 'tk1')
+    )
+    A(
+      'cache holds NO raw token',
+      !readFileSync(join(userData, 'clickup-cache.json')).includes(FAKE)
+    )
+
+    // Partial refresh (one list fails): must MERGE over the last-full set (tk1 stays,
+    // tk2 added) and must NOT clobber the good cache (offline stays the last FULL set).
+    const cacheFetchedAt = readClickUpCache(userData)?.fetchedAt
+    await refreshCatalogue(engine, { fetchFn: partialFetch, envDir: userData })
+    A(
+      'injected partial → status "partial"',
+      catalogueMeta.status === 'partial',
+      catalogueMeta.status
+    )
+    const pausedAfterPartial = engine.getState().paused.map((t) => t.id)
+    A(
+      'partial MERGES: keeps last-full tk1 AND adds fetched tk2 (no vanish)',
+      pausedAfterPartial.includes('tk1') && pausedAfterPartial.includes('tk2'),
+      pausedAfterPartial.join(',')
+    )
+    const cacheAfterPartial = readClickUpCache(userData)
+    A(
+      'partial does NOT overwrite the last-good-full cache (still tk1, not tk2)',
+      !!cacheAfterPartial &&
+        cacheAfterPartial.tasks.some((t) => t.id === 'tk1') &&
+        !cacheAfterPartial.tasks.some((t) => t.id === 'tk2') &&
+        cacheAfterPartial.fetchedAt === cacheFetchedAt,
+      cacheAfterPartial?.tasks.map((t) => t.id).join(',')
+    )
+
+    await refreshCatalogue(engine, { fetchFn: unauthorizedFetch, envDir: userData })
+    A(
+      'injected 401 → status "invalid-token" (connect prompt)',
+      catalogueMeta.status === 'invalid-token',
+      catalogueMeta.status
+    )
+    A('invalid-token keeps the cached catalogue', !!readClickUpCache(userData))
+
+    await refreshCatalogue(engine, { fetchFn: networkErrorFetch, envDir: userData })
+    A(
+      'injected network error → status "offline" (cache kept)',
+      catalogueMeta.status === 'offline',
+      catalogueMeta.status
+    )
+    A('offline keeps the cached catalogue', !!readClickUpCache(userData))
+
+    // 4) Clear → gone → no-token resolution → 'no-token' meta.
+    clearStoredToken()
+    A('clearStoredToken removes the blob', !hasStoredToken() && readStoredToken() === null)
+    A(
+      'no token resolves to null (isolated dir, no .env.local)',
+      resolveActiveToken(userData) === null
+    )
+    await refreshCatalogue(engine, { fetchFn: okFetch, envDir: userData })
+    A(
+      'no token → status "no-token" (connect prompt, no fetch)',
+      catalogueMeta.status === 'no-token',
+      catalogueMeta.status
+    )
+
+    const ok = results.every((r) => r.pass)
+    writeTokenResult(ok, results, null)
+    app.exit(ok ? 0 : 1)
+  } catch (err) {
+    A('token verify threw', false, err instanceof Error ? err.message : String(err))
+    writeTokenResult(false, results, err instanceof Error ? err.message : String(err))
+    app.exit(1)
+  }
+}
+
 // Single-instance lock: the flyout is hidden by default, so a second launch must
 // SHOW + reposition the existing window (not merely focus an invisible one) — or,
 // if it raced in before the window exists, mark it for reveal on ready-to-show.
@@ -924,6 +1379,13 @@ app.whenReady().then(() => {
   // never spins up the tray/window/live fetch of a normal run.
   if (CLICKUPTEST) {
     void runClickUpVerify()
+    return
+  }
+
+  // Stage-5b token/connect harness: a window-less check of the safeStorage token
+  // round-trip + the connection state machine (injected fetch, no network).
+  if (TOKENTEST) {
+    void runTokenVerify()
     return
   }
 
@@ -964,6 +1426,7 @@ app.whenReady().then(() => {
   const engine = CadenceEngine.create({ dir: app.getPath('userData'), now: Date.now })
   engineRef = engine
   registerDomainIpc(engine)
+  registerCatalogueIpc(engine)
   startTick(engine)
 
   createWindow()
@@ -980,11 +1443,15 @@ app.whenReady().then(() => {
     if (app.isPackaged) applyAutostart(true)
   }
 
-  // Stage-5a: fetch the real ClickUp catalogue once on launch (non-fatal, no token
-  // → skip). Skipped under every harness — CLICKUPTEST returns early above, and the
-  // smoke/ipc/tray harnesses must not make network calls or reshape their fixtures.
+  // Stage-5b: cache-first ClickUp launch. Seed the connection meta, render the
+  // cached catalogue instantly (offline-safe), then refresh from the API in the
+  // background (non-fatal, no token → connect prompt). Skipped under every harness —
+  // CLICKUPTEST returns early above, and the smoke/ipc/tray harnesses must not make
+  // network calls or reshape their fixtures.
   if (!HARNESS) {
-    void refreshCatalogueOnLaunch(engine)
+    initCatalogueMeta()
+    loadCachedCatalogue(engine)
+    void refreshCatalogue(engine)
   }
 
   registerIpcVerify()

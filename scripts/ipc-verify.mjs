@@ -62,7 +62,8 @@ function finish(code) {
     console.log(`${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : '  → ' + r.detail}`)
   }
   if (result.error) console.log('error:', result.error)
-  if (result.rendererErrors?.length) console.log('rendererErrors:', JSON.stringify(result.rendererErrors))
+  if (result.rendererErrors?.length)
+    console.log('rendererErrors:', JSON.stringify(result.rendererErrors))
 
   const allPass = result.ok && code === 0
   console.log(allPass ? '\nIPC-VERIFY PASS' : '\nIPC-VERIFY FAIL')

@@ -10,7 +10,7 @@
  * main sends it.
  */
 
-import type { ManualTaskInput, StateSnapshot } from './types'
+import type { CatalogueMeta, ManualTaskInput, StateSnapshot } from './types'
 
 export const IpcChannels = {
   /** Renderer → main → 'pong'. Smoke-proof that the typed bridge round-trips. */
@@ -41,7 +41,25 @@ export const IpcChannels = {
   closeWindow: 'cadence:window-close',
   /** Renderer → main. Report the panel's natural content height (px) so main can
    *  size the transparent window to it (content-driven height + internal scroll). */
-  resizeWindow: 'cadence:window-resize'
+  resizeWindow: 'cadence:window-resize',
+
+  // ── Stage 5b ClickUp integration surface ─────────────────────────────────
+  /** Renderer → main → current {@link CatalogueMeta} (initial load). */
+  getCatalogueMeta: 'cadence:get-catalogue-meta',
+  /** Renderer → main → {@link CatalogueMeta}. Trigger a manual catalogue refresh
+   *  (metadata-only; never touches intervals). Resolves with the immediate meta
+   *  (usually `connecting`); further meta arrives via `catalogueMetaUpdate`. */
+  refreshCatalogue: 'cadence:refresh-catalogue',
+  /** Renderer → main → {@link CatalogueMeta}. Store a pasted `pk_` token (encrypted
+   *  at rest) and kick off a refresh. The token travels in-process only, never
+   *  logged. Resolves with the immediate meta. */
+  setClickUpToken: 'cadence:set-clickup-token',
+  /** Main → renderer (push). A fresh {@link CatalogueMeta} whenever it changes
+   *  (connect/refresh transitions). */
+  catalogueMetaUpdate: 'cadence:catalogue-meta-update',
+  /** Main → renderer (push). Ask the flyout to reveal the token-entry field —
+   *  fired by the tray's "Connect ClickUp…" item so it works even when connected. */
+  openConnect: 'cadence:open-connect'
 } as const
 
 export interface AppInfo {
@@ -103,4 +121,19 @@ export interface CadenceApi {
   /** Report the panel's natural content height (px) so main sizes the window to
    *  fit, clamping to the work area (then the PAUSED list scrolls). Fire-and-forget. */
   resizeTo: (panelHeight: number) => void
+
+  // ── Stage 5b ClickUp integration surface ─────────────────────────────────
+  /** Fetch the current {@link CatalogueMeta} (used once on mount). */
+  getCatalogueMeta: () => Promise<CatalogueMeta>
+  /** Trigger a manual catalogue refresh (metadata-only). Resolves with the
+   *  immediate meta; further transitions arrive via {@link onCatalogueMeta}. */
+  refreshCatalogue: () => Promise<CatalogueMeta>
+  /** Store a pasted `pk_` token (encrypted at rest) and refresh. The token is sent
+   *  in-process only and never logged. Resolves with the immediate meta. */
+  setClickUpToken: (token: string) => Promise<CatalogueMeta>
+  /** Subscribe to pushed {@link CatalogueMeta} updates; returns an unsubscribe. */
+  onCatalogueMeta: (cb: (meta: CatalogueMeta) => void) => () => void
+  /** Subscribe to the tray's "Connect ClickUp…" trigger (reveal the token field);
+   *  returns an unsubscribe. */
+  onOpenConnect: (cb: () => void) => () => void
 }

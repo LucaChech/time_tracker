@@ -32,11 +32,18 @@
  *  - `user.id` and `assignees[].id` are NUMBERS → normalized to strings so they
  *    compare cleanly against the filter's string `currentUserId`.
  *
- * Deferred to Stage 5b (do not add here): cache-first launch, manual refresh,
- * 100-req/min throttle, `429` / `X-RateLimit-Reset` backoff, per-list failure
- * skipping, the "Connect ClickUp" empty state, and the `safeStorage`-encrypted
- * in-app token field. 5a fetches once and either returns the real catalogue or
- * throws; the caller degrades non-fatally.
+ * Stage 5b adds resilience INSIDE the client: a sliding-window throttle to stay
+ * under the 100-req/min free-tier floor, `429` / `X-RateLimit-Reset` backoff with
+ * bounded retries, and per-space / per-list failure skipping (a single bad list no
+ * longer drops the whole catalogue — the result is flagged `partial`). Everything
+ * is still injected (a fake `fetch`, plus injectable `sleep` / `now`) so the
+ * backoff and throttle are unit-testable with a virtual clock and no real waiting.
+ *
+ * Owned by the CALLER (src/main/index.ts, Stage 5b), NOT here: cache-first launch
+ * (`clickup-cache.json`), the manual Refresh trigger, the "Connect ClickUp" empty
+ * state, and the `safeStorage`-encrypted token (`token-store.ts`). This module is
+ * still GET-only and stateless per call; it either returns the catalogue (possibly
+ * `partial`) or throws a typed {@link ClickUpApiError} on a fatal (auth) failure.
  */
 
 import { existsSync, readFileSync } from 'node:fs'
@@ -47,8 +54,31 @@ import type { Task } from '@shared/types'
 export const CLICKUP_BASE = 'https://api.clickup.com/api/v2'
 
 /** Per-request timeout (ms). Bounds each GET so a hung connection can't stall the
- *  launch fetch or the verify harness. Not a retry/backoff policy — that's Stage 5b. */
+ *  launch fetch or the verify harness. Distinct from the 429 backoff below: this is
+ *  a hard deadline on a SINGLE attempt; the backoff waits BETWEEN attempts. */
 const DEFAULT_REQUEST_TIMEOUT_MS = 20_000
+
+/** ClickUp's Free-plan rate-limit floor: 100 requests / rolling minute. The client
+ *  throttles to stay under this with a sliding window; the `429` backoff is the
+ *  belt-and-suspenders safety net when the server's window and ours disagree. */
+const RATE_LIMIT_PER_MINUTE = 100
+const RATE_WINDOW_MS = 60_000
+
+/** How many times a single GET is retried after a `429` before it gives up and
+ *  throws. Bounded so a persistently rate-limited/looping endpoint can't hang. */
+const DEFAULT_MAX_429_RETRIES = 3
+
+/** Fallback backoff (ms) when a `429` carries no usable reset header, and the hard
+ *  cap on any computed wait so a bogus/huge header can never stall the traversal. */
+const DEFAULT_BACKOFF_MS = 2_000
+const MAX_BACKOFF_MS = 60_000
+/** Small cushion added to a header-derived reset so we resume just AFTER the window
+ *  rolls over, not a hair before it (which would immediately 429 again). */
+const BACKOFF_BUFFER_MS = 500
+
+/** Real wall-clock sleep. Injectable (see {@link FetchCatalogueDeps.sleep}) so
+ *  tests advance a virtual clock instead of actually waiting. */
+const realSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, Math.max(0, ms)))
 
 /**
  * The card palette for ClickUp lists — the exact five signed-off `3a` card colors
@@ -184,17 +214,65 @@ export interface Catalogue {
   currentUserId: string
   /** All open tasks + subtasks across every space/list, deduped by id. */
   tasks: Task[]
+  /** True when at least one space or list was SKIPPED after a non-fatal error, so
+   *  the catalogue is incomplete. The caller keeps a partial result (better than
+   *  nothing) but surfaces a "some lists couldn't load" state rather than treating
+   *  it as a clean refresh. Auth failures (`/user`, `/team`) are fatal and throw
+   *  instead — they never yield a partial. */
+  partial: boolean
 }
 
 /** Injected dependencies for {@link fetchCatalogue} — the token plus optional
- *  overrides for `fetch`, the base URL, and the per-request timeout, so tests drive
- *  a fake transport. */
+ *  overrides so tests drive a fake transport and a virtual clock (no real waiting). */
 export interface FetchCatalogueDeps {
   token: string
   fetchFn?: typeof fetch
   base?: string
   /** Per-request timeout in ms (default {@link DEFAULT_REQUEST_TIMEOUT_MS}). */
   perRequestTimeoutMs?: number
+  /** Sleep used by the throttle + 429 backoff (default: real `setTimeout`). Tests
+   *  inject a fake that advances their virtual clock instead of waiting. */
+  sleep?: (ms: number) => Promise<void>
+  /** Clock for the sliding-window throttle + backoff math (default `Date.now`). */
+  now?: () => number
+  /** Sliding-window request cap per minute (default {@link RATE_LIMIT_PER_MINUTE}). */
+  maxRequestsPerMinute?: number
+  /** Max retries after a `429` for one GET (default {@link DEFAULT_MAX_429_RETRIES}). */
+  maxRetriesPer429?: number
+}
+
+/** The minimal `Headers`-like surface we read for 429 backoff — case-insensitive
+ *  `get`, satisfied by the real `fetch` Response and the tests' fake. */
+interface HeaderBag {
+  get(name: string): string | null
+}
+
+/**
+ * Compute how long to wait before retrying a `429`, from its rate-limit headers.
+ * Prefers `X-RateLimit-Reset` (epoch SECONDS when the window resets); falls back to
+ * `Retry-After` (seconds); else an exponential-ish default by attempt. Always
+ * clamped to `[0, MAX_BACKOFF_MS]` and nudged past the reset by a small buffer, so
+ * a malformed or hostile header can never produce a negative or unbounded wait.
+ */
+export function computeBackoffMs(
+  headers: HeaderBag | undefined,
+  nowMs: number,
+  attempt: number
+): number {
+  let waitMs = NaN
+  const reset = headers?.get('x-ratelimit-reset')
+  const retryAfter = headers?.get('retry-after')
+  if (reset != null && reset.trim() !== '' && Number.isFinite(Number(reset))) {
+    waitMs = Number(reset) * 1000 - nowMs + BACKOFF_BUFFER_MS
+  } else if (
+    retryAfter != null &&
+    retryAfter.trim() !== '' &&
+    Number.isFinite(Number(retryAfter))
+  ) {
+    waitMs = Number(retryAfter) * 1000 + BACKOFF_BUFFER_MS
+  }
+  if (!Number.isFinite(waitMs) || waitMs < 0) waitMs = DEFAULT_BACKOFF_MS * (attempt + 1)
+  return Math.min(Math.max(0, waitMs), MAX_BACKOFF_MS)
 }
 
 // ── mapping ──────────────────────────────────────────────────────────────────
@@ -250,31 +328,69 @@ export async function fetchCatalogue(deps: FetchCatalogueDeps): Promise<Catalogu
   const fetchFn = deps.fetchFn ?? fetch
   const base = deps.base ?? CLICKUP_BASE
   const timeoutMs = deps.perRequestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS
+  const sleep = deps.sleep ?? realSleep
+  const now = deps.now ?? Date.now
+  // Clamp to ≥ 1 so a 0/negative cap can't strand the throttle in a busy-loop.
+  const maxPerMinute = Math.max(1, deps.maxRequestsPerMinute ?? RATE_LIMIT_PER_MINUTE)
+  const maxRetries = deps.maxRetriesPer429 ?? DEFAULT_MAX_429_RETRIES
 
-  const get = async <T>(path: string): Promise<T> => {
-    // A per-request deadline (not full retry/backoff — that's Stage 5b): a clean
-    // throw beats an unbounded await if a connection hangs. `AbortSignal.timeout`
-    // aborts the fetch after `timeoutMs`, surfacing as a rejection the caller
-    // handles (non-fatal on launch; a clean, attributable FAIL in the harness).
-    const res = await fetchFn(base + path, {
-      headers: { Authorization: deps.token },
-      signal: AbortSignal.timeout(timeoutMs)
-    })
-    if (!res.ok) throw new ClickUpApiError(res.status, path)
-    try {
-      return (await res.json()) as T
-    } catch {
-      // A 2xx with a non-JSON body (proxy interstitial, empty response) surfaces
-      // through the typed error channel rather than as a raw SyntaxError.
-      throw new ClickUpApiError(res.status, path)
+  // Sliding-window throttle: the timestamps of recent requests. Before each request
+  // we drop entries older than the 60s window and, if we're already at the cap,
+  // sleep until the oldest falls out. This holds us under the 100/min floor without
+  // a fixed per-request delay, so a small workspace still fetches at full speed.
+  const recent: number[] = []
+  const throttle = async (): Promise<void> => {
+    for (;;) {
+      const t = now()
+      // Drop entries that have aged out — OR that sit in the FUTURE (a backward
+      // clock/NTP step), so a clock jump can't wedge the window (mirrors the app's
+      // clock-step defense elsewhere).
+      while (recent.length > 0 && (t - recent[0] >= RATE_WINDOW_MS || recent[0] > t)) recent.shift()
+      if (recent.length < maxPerMinute) {
+        recent.push(t)
+        return
+      }
+      await sleep(Math.max(1, RATE_WINDOW_MS - (t - recent[0])))
     }
   }
 
+  const get = async <T>(path: string): Promise<T> => {
+    // Retry loop for `429`s; every other outcome returns/throws on the first pass.
+    for (let attempt = 0; ; attempt++) {
+      await throttle()
+      // A per-request deadline: a clean throw beats an unbounded await if a
+      // connection hangs. `AbortSignal.timeout` aborts the fetch after `timeoutMs`.
+      const res = await fetchFn(base + path, {
+        headers: { Authorization: deps.token },
+        signal: AbortSignal.timeout(timeoutMs)
+      })
+      if (res.status === 429) {
+        // Rate-limited: honor `X-RateLimit-Reset` / `Retry-After` and retry, up to
+        // the cap. Past the cap it becomes a typed error the caller degrades on.
+        if (attempt >= maxRetries) throw new ClickUpApiError(429, path)
+        await sleep(computeBackoffMs(res.headers, now(), attempt))
+        continue
+      }
+      if (!res.ok) throw new ClickUpApiError(res.status, path)
+      try {
+        return (await res.json()) as T
+      } catch {
+        // A 2xx with a non-JSON body (proxy interstitial, empty response) surfaces
+        // through the typed error channel rather than as a raw SyntaxError.
+        throw new ClickUpApiError(res.status, path)
+      }
+    }
+  }
+
+  // `/user` + `/team` are the auth spine — a failure here is FATAL (bad/expired
+  // token, no egress) and throws, so the caller shows a connect/offline state
+  // rather than a misleading empty-but-"connected" catalogue.
   const user = await get<RawUser>('/user')
   const currentUserId = user.user?.id === undefined ? '' : String(user.user.id)
 
   const seen = new Set<string>()
   const tasks: Task[] = []
+  let partial = false
 
   // ClickUp-supplied ids are URL-encoded before interpolation — the base host is
   // fixed, but a malformed id must never reshape the request path.
@@ -282,19 +398,32 @@ export async function fetchCatalogue(deps: FetchCatalogueDeps): Promise<Catalogu
   for (const team of teams) {
     if (team.id === undefined || team.id === null) continue
     const teamId = encodeURIComponent(String(team.id))
-    const spaces = (await get<RawSpaces>(`/team/${teamId}/space?archived=false`)).spaces ?? []
+    let spaces: NonNullable<RawSpaces['spaces']> = []
+    try {
+      spaces = (await get<RawSpaces>(`/team/${teamId}/space?archived=false`)).spaces ?? []
+    } catch {
+      partial = true // one team's spaces couldn't be listed — keep the rest
+      continue
+    }
     for (const space of spaces) {
       if (space.id === undefined || space.id === null) continue
       const spaceId = encodeURIComponent(String(space.id))
       const spaceName = typeof space.name === 'string' ? space.name : '(space)'
 
-      // Lists in folders, then folderless lists — one deterministic order.
+      // A space's list LISTING failing means we can't resolve its breadcrumbs, so
+      // skip the whole space (mark partial) and carry on with the others.
       const lists: RawList[] = []
-      const folders =
-        (await get<RawFolders>(`/space/${spaceId}/folder?archived=false`)).folders ?? []
-      for (const folder of folders) for (const l of folder.lists ?? []) lists.push(l)
-      const folderless = (await get<RawLists>(`/space/${spaceId}/list?archived=false`)).lists ?? []
-      for (const l of folderless) lists.push(l)
+      try {
+        const folders =
+          (await get<RawFolders>(`/space/${spaceId}/folder?archived=false`)).folders ?? []
+        for (const folder of folders) for (const l of folder.lists ?? []) lists.push(l)
+        const folderless =
+          (await get<RawLists>(`/space/${spaceId}/list?archived=false`)).lists ?? []
+        for (const l of folderless) lists.push(l)
+      } catch {
+        partial = true
+        continue
+      }
 
       for (const list of lists) {
         if (list.id === undefined || list.id === null) continue
@@ -303,17 +432,24 @@ export async function fetchCatalogue(deps: FetchCatalogueDeps): Promise<Catalogu
           list: typeof list.name === 'string' ? list.name : '(list)',
           listId: String(list.id)
         }
-        for (const raw of await fetchAllListTasks(get, String(list.id))) {
-          const id = String(raw.id)
-          if (raw.id === undefined || raw.id === null || seen.has(id)) continue
-          seen.add(id) // first breadcrumb wins
-          tasks.push(mapTask(raw, ctx))
+        // One bad list must not drop the whole catalogue: skip it, mark partial.
+        // The map/dedupe runs INSIDE the try too, so a throw while shaping a row
+        // skips only its list rather than aborting the whole traversal.
+        try {
+          for (const raw of await fetchAllListTasks(get, String(list.id))) {
+            const id = String(raw.id)
+            if (raw.id === undefined || raw.id === null || seen.has(id)) continue
+            seen.add(id) // first breadcrumb wins
+            tasks.push(mapTask(raw, ctx))
+          }
+        } catch {
+          partial = true
         }
       }
     }
   }
 
-  return { currentUserId, tasks }
+  return { currentUserId, tasks, partial }
 }
 
 /** Page through one list's open tasks + subtasks. Stops on `last_page === true`

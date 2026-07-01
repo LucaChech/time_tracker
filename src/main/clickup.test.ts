@@ -12,6 +12,7 @@ import {
   CLICKUP_PALETTE,
   ClickUpApiError,
   colorForList,
+  computeBackoffMs,
   fetchCatalogue,
   mapTask,
   parseTokenFromEnv,
@@ -228,5 +229,245 @@ describe('fetchCatalogue', () => {
     await expect(fetchCatalogue({ token: 'pk_bad', fetchFn })).rejects.toMatchObject({
       status: 401
     })
+  })
+})
+
+// ── Stage 5b: resilience (throttle · 429 backoff · per-list skip) ──────────────
+
+const BASE = 'https://api.clickup.com/api/v2'
+
+/** Case-insensitive Headers-like bag (what the 429 backoff reads). */
+function headerBag(map: Record<string, string>): { get(name: string): string | null } {
+  const lower: Record<string, string> = {}
+  for (const k of Object.keys(map)) lower[k.toLowerCase()] = map[k]
+  return { get: (name: string) => lower[name.toLowerCase()] ?? null }
+}
+
+/** A fake Response with a status, JSON body, and optional headers. */
+function res(status: number, body: unknown, headers: Record<string, string> = {}): unknown {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: headerBag(headers),
+    json: async () => body
+  }
+}
+
+/** Build a fake `fetch` from a per-path handler (receives the path minus the base). */
+function handlerFetch(handler: (path: string) => unknown): typeof fetch {
+  return (async (input: string) => handler(input.replace(BASE, ''))) as unknown as typeof fetch
+}
+
+/** A virtual clock: `now` reads it, `sleep` records the wait AND advances it, so the
+ *  throttle + backoff run instantly and deterministically with no real waiting. */
+function virtualClock(start = 1_000_000): {
+  now: () => number
+  sleep: (ms: number) => Promise<void>
+  sleeps: number[]
+} {
+  let t = start
+  const sleeps: number[] = []
+  return {
+    now: () => t,
+    sleep: async (ms: number) => {
+      sleeps.push(ms)
+      t += ms
+    },
+    sleeps
+  }
+}
+
+describe('computeBackoffMs', () => {
+  it('honors X-RateLimit-Reset (epoch seconds) with a small buffer', () => {
+    // reset = 1005s, now = 1_000_000ms (1000s) → ~5s wait + 500ms buffer.
+    expect(computeBackoffMs(headerBag({ 'x-ratelimit-reset': '1005' }), 1_000_000, 0)).toBe(5_500)
+  })
+
+  it('falls back to Retry-After (seconds) when no reset header', () => {
+    expect(computeBackoffMs(headerBag({ 'retry-after': '3' }), 1_000_000, 0)).toBe(3_500)
+  })
+
+  it('falls back to an attempt-scaled default when no usable header', () => {
+    expect(computeBackoffMs(headerBag({}), 1_000_000, 0)).toBe(2_000)
+    expect(computeBackoffMs(headerBag({}), 1_000_000, 2)).toBe(6_000)
+    expect(computeBackoffMs(undefined, 1_000_000, 0)).toBe(2_000)
+  })
+
+  it('never returns negative and caps a bogus/huge header', () => {
+    // reset in the PAST (negative wait — clock skew) is unusable → the default
+    // backoff, not a tight 0ms retry loop.
+    expect(computeBackoffMs(headerBag({ 'x-ratelimit-reset': '1' }), 1_000_000, 0)).toBe(2_000)
+    // reset absurdly far in the future → capped, not unbounded.
+    expect(computeBackoffMs(headerBag({ 'x-ratelimit-reset': '999999999' }), 1_000_000, 0)).toBe(
+      60_000
+    )
+  })
+})
+
+describe('fetchCatalogue — 429 backoff', () => {
+  it('honors a 429 with X-RateLimit-Reset, retries, then succeeds', async () => {
+    const clock = virtualClock()
+    let userCalls = 0
+    const fetchFn = handlerFetch((path) => {
+      if (path === '/user') {
+        userCalls++
+        if (userCalls <= 2) {
+          // reset 3s past the current virtual now → a positive, bounded wait each time.
+          const resetSec = Math.floor(clock.now() / 1000) + 3
+          return res(429, {}, { 'x-ratelimit-reset': String(resetSec) })
+        }
+        return res(200, { user: { id: 42 } })
+      }
+      if (path === '/team') return res(200, { teams: [] })
+      return res(404, {})
+    })
+
+    const cat = await fetchCatalogue({
+      token: 'pk_x',
+      fetchFn,
+      now: clock.now,
+      sleep: clock.sleep
+    })
+
+    expect(userCalls).toBe(3) // two 429s + one success
+    expect(clock.sleeps.length).toBe(2) // one backoff per 429
+    expect(clock.sleeps.every((s) => s > 0 && s <= 60_000)).toBe(true)
+    expect(cat.currentUserId).toBe('42')
+    expect(cat.partial).toBe(false)
+  })
+
+  it('gives up with a ClickUpApiError(429) after exhausting retries', async () => {
+    const clock = virtualClock()
+    let calls = 0
+    const fetchFn = handlerFetch((path) => {
+      if (path === '/user') {
+        calls++
+        return res(429, {}, { 'retry-after': '1' })
+      }
+      return res(404, {})
+    })
+
+    await expect(
+      fetchCatalogue({
+        token: 'pk_x',
+        fetchFn,
+        now: clock.now,
+        sleep: clock.sleep,
+        maxRetriesPer429: 2
+      })
+    ).rejects.toMatchObject({ status: 429 })
+    expect(calls).toBe(3) // attempts 0,1,2 → the third 429 (attempt==maxRetries) throws
+  })
+})
+
+describe('fetchCatalogue — per-space / per-list failure skipping', () => {
+  const skeleton: Record<string, unknown> = {
+    '/user': res(200, { user: { id: 7 } }),
+    '/team': res(200, { teams: [{ id: 'T1' }] })
+  }
+
+  it('skips a single failing list and flags the catalogue partial (others survive)', async () => {
+    const routes: Record<string, unknown> = {
+      ...skeleton,
+      '/team/T1/space?archived=false': res(200, { spaces: [{ id: 'S1', name: 'Space' }] }),
+      '/space/S1/folder?archived=false': res(200, { folders: [] }),
+      '/space/S1/list?archived=false': res(200, {
+        lists: [
+          { id: 'GOOD', name: 'Good List' },
+          { id: 'BAD', name: 'Bad List' }
+        ]
+      }),
+      [`/list/GOOD/task?${TASK_QS}&page=0`]: res(200, {
+        tasks: [{ id: 'g1', name: 'Good task', assignees: [] }],
+        last_page: true
+      }),
+      [`/list/BAD/task?${TASK_QS}&page=0`]: res(500, {})
+    }
+    const cat = await fetchCatalogue({
+      token: 'pk_x',
+      fetchFn: handlerFetch((p) => routes[p] ?? res(404, {}))
+    })
+
+    expect(cat.partial).toBe(true)
+    expect(cat.tasks.map((t) => t.id)).toEqual(['g1']) // the bad list is skipped, not fatal
+  })
+
+  it('skips a whole space whose list listing fails, keeps the other space', async () => {
+    const routes: Record<string, unknown> = {
+      ...skeleton,
+      '/team/T1/space?archived=false': res(200, {
+        spaces: [
+          { id: 'S1', name: 'Broken Space' },
+          { id: 'S2', name: 'Fine Space' }
+        ]
+      }),
+      // S1's folder listing 500s → whole space skipped.
+      '/space/S1/folder?archived=false': res(500, {}),
+      '/space/S2/folder?archived=false': res(200, { folders: [] }),
+      '/space/S2/list?archived=false': res(200, { lists: [{ id: 'L2', name: 'L2' }] }),
+      [`/list/L2/task?${TASK_QS}&page=0`]: res(200, {
+        tasks: [{ id: 's2t', name: 'From S2', assignees: [] }],
+        last_page: true
+      })
+    }
+    const cat = await fetchCatalogue({
+      token: 'pk_x',
+      fetchFn: handlerFetch((p) => routes[p] ?? res(404, {}))
+    })
+
+    expect(cat.partial).toBe(true)
+    expect(cat.tasks.map((t) => t.id)).toEqual(['s2t'])
+  })
+
+  it('a failure at /user or /team is FATAL (throws, not partial)', async () => {
+    const userFail = handlerFetch((p) => (p === '/user' ? res(401, {}) : res(200, {})))
+    await expect(fetchCatalogue({ token: 'pk_x', fetchFn: userFail })).rejects.toMatchObject({
+      status: 401
+    })
+  })
+})
+
+describe('fetchCatalogue — throttle stays under the request cap', () => {
+  it('paces requests via sleep when the sliding window is full, without dropping any', async () => {
+    const clock = virtualClock()
+    const routes: Record<string, unknown> = {
+      '/user': res(200, { user: { id: 1 } }),
+      '/team': res(200, { teams: [{ id: 'T1' }] }),
+      '/team/T1/space?archived=false': res(200, { spaces: [{ id: 'S1', name: 'S' }] }),
+      '/space/S1/folder?archived=false': res(200, { folders: [] }),
+      '/space/S1/list?archived=false': res(200, { lists: [{ id: 'L1', name: 'L' }] }),
+      [`/list/L1/task?${TASK_QS}&page=0`]: res(200, {
+        tasks: [{ id: 'a', name: 'A', assignees: [] }],
+        last_page: true
+      })
+    }
+    // 6 GETs with a cap of 2/window → the throttle must sleep to pace them.
+    const cat = await fetchCatalogue({
+      token: 'pk_x',
+      fetchFn: handlerFetch((p) => routes[p] ?? res(404, {})),
+      now: clock.now,
+      sleep: clock.sleep,
+      maxRequestsPerMinute: 2
+    })
+
+    expect(clock.sleeps.length).toBeGreaterThan(0) // throttle kicked in
+    expect(cat.tasks.map((t) => t.id)).toEqual(['a']) // all requests still completed
+    expect(cat.partial).toBe(false)
+  })
+
+  it('a 0/negative cap is clamped to 1 — completes instead of busy-looping (would time out)', async () => {
+    const clock = virtualClock()
+    const routes: Record<string, unknown> = {
+      '/user': res(200, { user: { id: 1 } }),
+      '/team': res(200, { teams: [] })
+    }
+    const cat = await fetchCatalogue({
+      token: 'pk_x',
+      fetchFn: handlerFetch((p) => routes[p] ?? res(404, {})),
+      now: clock.now,
+      sleep: clock.sleep,
+      maxRequestsPerMinute: 0 // clamped to 1 — must not NaN-sleep / spin forever
+    })
+    expect(cat.currentUserId).toBe('1')
   })
 })

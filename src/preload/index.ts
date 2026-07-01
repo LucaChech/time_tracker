@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import { IpcChannels, type CadenceApi, type SmokeReport } from '@shared/ipc'
-import type { ManualTaskInput, StateSnapshot } from '@shared/types'
+import type { CatalogueMeta, ManualTaskInput, StateSnapshot } from '@shared/types'
 
 /**
  * Typed bridge. The renderer only ever talks to the main process through this
@@ -33,7 +33,22 @@ const api: CadenceApi = {
   // Stage 4 window surface — fire-and-forget; main owns all window geometry.
   minimize: () => ipcRenderer.send(IpcChannels.minimizeWindow),
   close: () => ipcRenderer.send(IpcChannels.closeWindow),
-  resizeTo: (panelHeight: number) => ipcRenderer.send(IpcChannels.resizeWindow, panelHeight)
+  resizeTo: (panelHeight: number) => ipcRenderer.send(IpcChannels.resizeWindow, panelHeight),
+
+  // Stage 5b ClickUp integration surface — thin invoke wrappers + one push sub.
+  getCatalogueMeta: () => ipcRenderer.invoke(IpcChannels.getCatalogueMeta),
+  refreshCatalogue: () => ipcRenderer.invoke(IpcChannels.refreshCatalogue),
+  setClickUpToken: (token: string) => ipcRenderer.invoke(IpcChannels.setClickUpToken, token),
+  onCatalogueMeta: (cb: (meta: CatalogueMeta) => void) => {
+    const listener = (_event: IpcRendererEvent, meta: CatalogueMeta): void => cb(meta)
+    ipcRenderer.on(IpcChannels.catalogueMetaUpdate, listener)
+    return () => ipcRenderer.removeListener(IpcChannels.catalogueMetaUpdate, listener)
+  },
+  onOpenConnect: (cb: () => void) => {
+    const listener = (): void => cb()
+    ipcRenderer.on(IpcChannels.openConnect, listener)
+    return () => ipcRenderer.removeListener(IpcChannels.openConnect, listener)
+  }
 }
 
 if (process.contextIsolated) {

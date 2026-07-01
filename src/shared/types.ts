@@ -104,6 +104,41 @@ export interface TaskRow extends Task {
 }
 
 /**
+ * ClickUp connection status, driving the footer label + the connect prompt
+ * (Stage 5b). Kept out of {@link StateSnapshot} because it is NOT derived from the
+ * worklog — it is the live state of the external integration, pushed on its own
+ * channel so the snapshot stays a pure engine projection.
+ *  - `no-token`      — no token anywhere → show the "Connect ClickUp" prompt.
+ *  - `connecting`    — a fetch/refresh is in flight.
+ *  - `connected`     — last refresh fully succeeded.
+ *  - `partial`       — last refresh succeeded but some spaces/lists were skipped.
+ *  - `offline`       — last refresh failed (network); the cached catalogue stands.
+ *  - `invalid-token` — the token was rejected (401/403) → show the connect prompt.
+ */
+export type ConnectionStatus =
+  'no-token' | 'connecting' | 'connected' | 'partial' | 'offline' | 'invalid-token'
+
+/**
+ * The ClickUp integration's state, pushed to the renderer alongside (but separate
+ * from) the engine {@link StateSnapshot}. Feeds the "Assigned to me" filter
+ * (`currentUserId`), the footer's "refreshed Xm ago" (`refreshedAt`), and the
+ * connect prompt (`status`, `hasToken`, `encryptionAvailable`). Carries NO secret.
+ */
+export interface CatalogueMeta {
+  status: ConnectionStatus
+  /** The authenticated ClickUp user id, or `null` before a successful fetch/cache
+   *  is available. The "Assigned to me" filter key. */
+  currentUserId: string | null
+  /** Epoch ms of the last successful catalogue fetch (or cache), else `null`. */
+  refreshedAt: number | null
+  /** Whether a token is present (env / `.env.local` / encrypted store). */
+  hasToken: boolean
+  /** Whether OS-encrypted at-rest token storage is available (safeStorage/DPAPI).
+   *  When false, the connect UI warns that a pasted token can't be persisted. */
+  encryptionAvailable: boolean
+}
+
+/**
  * The complete session-scoped projection the renderer consumes. The renderer is
  * a pure render of this snapshot — it never recomputes timing or re-sums.
  */

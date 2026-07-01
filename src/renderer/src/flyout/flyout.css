@@ -529,6 +529,30 @@
   border-radius: 8px;
 }
 
+/* ---- Connect ClickUp prompt (Stage 5b) ---- */
+.connect-copy {
+  font:
+    500 11.5px 'Work Sans',
+    sans-serif;
+  line-height: 1.45;
+  color: rgba(0, 0, 0, 0.55);
+  margin-bottom: 9px;
+}
+.connect-input {
+  width: 100%;
+  margin-bottom: 9px;
+  letter-spacing: 0.04em;
+}
+/* A warning (not success — no green): OS secure storage unavailable. */
+.connect-warn {
+  font:
+    600 10.5px 'Work Sans',
+    sans-serif;
+  line-height: 1.4;
+  color: #c64f00;
+  margin-bottom: 9px;
+}
+
 /* ---- Filter chips ---- */
 .filter-group {
   margin-bottom: 9px;
