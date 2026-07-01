@@ -5,7 +5,7 @@ import { ActiveCard } from './ActiveCard'
 import { PausedRow } from './PausedRow'
 import { Composer, type ManualDraft } from './Composer'
 import { FilterControl } from './FilterControl'
-import { EMPTY_FILTER, type FilterState, isFilterActive } from './filter'
+import { applyPausedFilter, EMPTY_FILTER, type FilterState, isFilterActive } from './filter'
 import { fmtHM } from './format'
 
 type InsetPanel = 'none' | 'composer' | 'filter'
@@ -41,6 +41,12 @@ export function Flyout({
   const [filter, setFilter] = useState<FilterState>(EMPTY_FILTER)
 
   const { active, paused, runningCount, pausedCount, sessionWorkedMs } = snapshot
+
+  // The filter is VIEW-ONLY: it narrows which paused rows render, and nothing
+  // else. ACTIVE is never filtered (a running task is always visible), and the
+  // "M idle" pill below keeps `pausedCount` (the full paused total), never this
+  // filtered length — so "247 idle" stays truthful while the list is narrowed.
+  const visiblePaused = applyPausedFilter(paused, filter)
 
   return (
     <div className="stage">
@@ -84,14 +90,16 @@ export function Flyout({
             <div className="section-empty">No timers running</div>
           )}
 
-          {/* PAUSED */}
+          {/* PAUSED — the filtered view; the pill above still counts them all */}
           <div className="section-label section-label--gap">PAUSED</div>
-          {paused.length > 0 ? (
-            paused.map((row) => (
+          {visiblePaused.length > 0 ? (
+            visiblePaused.map((row) => (
               <PausedRow key={row.id} row={row} onPlay={onPlay} onRemove={onRemove} />
             ))
           ) : (
-            <div className="section-empty">No paused tasks</div>
+            <div className="section-empty">
+              {pausedCount > 0 ? 'No paused tasks match the filter' : 'No paused tasks'}
+            </div>
           )}
 
           {panel === 'composer' && (

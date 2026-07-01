@@ -13,6 +13,17 @@
 export type TaskSource = 'clickup' | 'manual'
 
 /**
+ * Input for `addManualTask`. Only `name` is required; `space`/`list` default to
+ * "Untracked" in the engine. Lives here (not in the engine) so the typed IPC
+ * contract and the renderer can reference it without importing from `src/main`.
+ */
+export interface ManualTaskInput {
+  name: string
+  space?: string
+  list?: string
+}
+
+/**
  * A trackable task. ClickUp supplies catalogue rows (Phase 5); `addManualTask`
  * mints local ones. `code` is the ClickUp custom id and is `null` unless the
  * workspace returns one (Business+ only — null on the target Free plan, so the
@@ -102,4 +113,10 @@ export interface StateSnapshot {
   sessionWorkedMs: number
   /** When the current session began (epoch ms). */
   sessionStartTs: number
+  /** The `now` this snapshot was derived at (epoch ms), monotonic across a run.
+   *  The renderer drops any snapshot older than the last it applied, so a slow
+   *  operation reply that resolves after a newer tick push cannot roll the
+   *  displayed timers backward (the invoke-reply vs push ordering is otherwise
+   *  not guaranteed across the two IPC channels). */
+  derivedAt: number
 }

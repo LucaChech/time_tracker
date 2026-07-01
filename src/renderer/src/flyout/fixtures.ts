@@ -120,7 +120,8 @@ const populated: StateSnapshot = {
   // Wall-clock union of run-intervals this session (≤ per-task sum, ≥ max single
   // task). A representative fixture value; the engine computes the real union.
   sessionWorkedMs: 9240 * SEC, // 2h 34m
-  sessionStartTs: 1_700_000_000_000 - 9240 * SEC
+  sessionStartTs: 1_700_000_000_000 - 9240 * SEC,
+  derivedAt: 1_700_000_000_000
 }
 
 // ---- Empty: a fresh session, nothing tracked yet ---------------------------
@@ -130,7 +131,8 @@ const empty: StateSnapshot = {
   runningCount: 0,
   pausedCount: 0,
   sessionWorkedMs: 0,
-  sessionStartTs: 1_700_000_000_000
+  sessionStartTs: 1_700_000_000_000,
+  derivedAt: 1_700_000_000_000
 }
 
 // ---- Long list: forces the PAUSED scroll region ----------------------------
@@ -190,7 +192,8 @@ const longList: StateSnapshot = {
   runningCount: longActive.length,
   pausedCount: longPaused.length,
   sessionWorkedMs: 6820 * SEC, // 1h 53m
-  sessionStartTs: 1_700_000_000_000 - 6820 * SEC
+  sessionStartTs: 1_700_000_000_000 - 6820 * SEC,
+  derivedAt: 1_700_000_000_000
 }
 
 export type ScenarioName = 'populated' | 'empty' | 'long'

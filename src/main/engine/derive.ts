@@ -232,6 +232,7 @@ export function deriveState(input: DeriveInput): StateSnapshot {
     runningCount: active.length,
     pausedCount: paused.length,
     sessionWorkedMs: sessionUnionMs(timelines.values(), sessionStartTs, now),
-    sessionStartTs
+    sessionStartTs,
+    derivedAt: now
   }
 }

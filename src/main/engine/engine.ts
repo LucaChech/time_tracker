@@ -18,7 +18,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { EventSource, StateSnapshot, Task, WorklogEvent } from '@shared/types'
+import type { EventSource, ManualTaskInput, StateSnapshot, Task, WorklogEvent } from '@shared/types'
 import { deriveState, replay } from './derive'
 import { appendEvent, readTasksStore, readWorklog, writeTasksStore } from './store'
 
@@ -29,11 +29,9 @@ export interface EngineDeps {
   now: () => number
 }
 
-export interface ManualTaskInput {
-  name: string
-  space?: string
-  list?: string
-}
+/** Re-exported from the shared data model so existing engine consumers keep
+ *  importing it from here; the canonical definition lives in `@shared/types`. */
+export type { ManualTaskInput } from '@shared/types'
 
 /** Cycled palette for manual tasks (IMPLEMENTATION_PLAN.md Phase 2). */
 const MANUAL_COLORS = ['#c64f00', '#4b3fb0', '#0091b3', '#fe9400'] as const
@@ -197,6 +195,20 @@ export class CadenceEngine {
 
   getSessionStartTs(): number {
     return this.sessionStartTs
+  }
+
+  /** Whether any timer is currently running — an O(1) check the display tick uses
+   *  to skip re-deriving the log when nothing would change. */
+  hasRunning(): boolean {
+    return this.runningIds.size > 0
+  }
+
+  /** Whether an id names a task we can render (in the live catalogue or the
+   *  persisted metadata snapshot). The IPC layer guards operations with this so a
+   *  malformed id can never open a phantom, unstoppable interval — one that would
+   *  inflate the session union with no row to stop it. */
+  hasTask(taskId: string): boolean {
+    return this.catalogue.has(taskId) || this.tasksStore.has(taskId)
   }
 
   // ── internals ─────────────────────────────────────────────────────────────
