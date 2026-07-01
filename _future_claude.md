@@ -6,7 +6,7 @@ Build **Cadence** — a Windows 11 system-tray time tracker whose differentiator
 tasks **in parallel**; ClickUp read-only, local-first, pixel-faithful to the `3a` flyout. Hands-off
 **dogfood** build. (Charter: `CLAUDE.md`. Plan: `IMPLEMENTATION_PLAN.md`. Spine: `VERIFICATION_SPINE.md`.)
 
-## ✅ Stage 6 (persistence hardening, packaging & ship) — CODE COMPLETE, reviewed (3-lens panel + re-review), all findings fixed, every automated gate green, artifacts built, committed + pushed. **This is the FINAL phase. The ONLY thing left is the T2 HUMAN GATE: Luca must clean-install + reboot (see "Next actions"). Once T2 passes, v0 is SHIPPED.**
+## ✅✅ v0 SHIPPED — Stage 6 complete AND the T2 human gate PASSED (2026-07-01). Luca installed the **portable** build and confirmed everything works end-to-end (tray flyout, Connect ClickUp, parallel timers, union total). The whole 6-phase build is DONE; there is no open v0 work. A post-ship filter question was raised and resolved with NO code change (see settled decisions). Stage 6 itself: code complete, reviewed (3-lens panel + re-review), all findings fixed, every automated gate green, artifacts built, committed + pushed (`af8f4fb`).
 Stage 6 turned the verified engine + integration into a shippable Windows app: a running-gated
 heartbeat writer that bounds crash-tail loss, a launch-hardening verify harness that proves the
 new-session/crash-close/no-phantom-time semantics on the built artifact, electron-builder packaging
@@ -78,27 +78,20 @@ spine (the plan's only T2: clean-install on a fresh Windows session + a real reb
   sentinel deliberately avoids the `pk_` prefix. `.gitignore` covers `.env.*`/`*.local`/`*.enc`/`dist`/`out`.
   `dist/` (the 112 MB exes) is gitignored (uncommittable).
 
-## Next actions (priority order) — the T2 HUMAN GATE (only Luca can do this) → then v0 is SHIPPED
-There is **no more autonomous code work** for v0. The plan's single remaining acceptance is the T2
-clean-install + reboot. Ask Luca to:
-1. **Install:** run `dist\cadence-0.0.0-setup.exe` (or the portable exe) on a real Windows session.
-   SmartScreen may warn (unsigned v0) → *More info → Run anyway*.
-2. **First-run acceptance:** confirm it (a) lives in the tray (click → flyout above the taskbar),
-   (b) **Connect ClickUp…** from the tray menu, paste a `pk_` token → the real catalogue loads into PAUSED,
-   (c) start several timers in parallel and see them tick independently; the "Current session" total +
-   tray tooltip show the wall-clock UNION (parallel overlaps counted once).
-3. **Reboot acceptance:** reboot Windows and confirm (a) Cadence **auto-starts on login** into the tray
-   (the deferred Phase-4 autostart proof), (b) it opens a **clean new session** — 0 totals, all paused,
-   session-removed rows reappear — with **no phantom time**, and (c) the ClickUp catalogue re-fetches.
-4. **(Optional but in the spine) offline-fonts on the PACKAGED build:** block the network and confirm the
-   installed app still renders Space Grotesk / Work Sans / Material Symbols (the automated half — 0 CDN
-   refs in the asar — is already done; only the visual-with-network-blocked half needs a human).
-- **If T2 passes:** v0 is done — tag/announce as Luca wishes; auto-`/future-claude` to record "SHIPPED".
-- **If T2 fails:** capture the exact symptom. Likely suspects & where to look: autostart not firing →
-  `applyAutostart`/`app.setLoginItemSettings` in `src/main/index.ts` (only runs `if (app.isPackaged)`);
-  phantom time after reboot → `CadenceEngine.create` crash-close (engine.ts:72-96) + the heartbeat cadence;
-  blank panel offline → `loadCachedCatalogue`/`clickup-cache.json`; missing glyphs/fonts → the Fontsource/
-  material-symbols imports in `src/renderer/src/main.tsx` (must stay self-hosted).
+## Next actions (priority order) — v0 is SHIPPED; no open build work
+The 6-phase v0 build is complete and accepted. Nothing is required to finish v0. If a NEW session opens,
+do **not** re-present the T2 gate (already passed) and do **not** re-run the build unless something changed.
+Only pick up if Luca asks for one of:
+- **A deferred feature** (explicitly OUT of v0 — see the deferred list below): ClickUp time-entry PUSH
+  (the architecture is push-ready — a future `add_time_entry` sync of finished blocks; client is currently
+  GET-only), daily/weekly summaries, permanent delete/rename, full idle detection, presence layer, output
+  metric, multi-monitor positioning, or a code-signing cert (v0 ships unsigned → SmartScreen warns).
+- **A bug found in daily dogfooding.** Repro, then check: autostart → `applyAutostart` (runs `if (app.isPackaged)`);
+  phantom time → `CadenceEngine.create` crash-close (engine.ts:72-96) + heartbeat cadence; offline blank →
+  `loadCachedCatalogue`/`clickup-cache.json`; fonts/glyphs → the Fontsource/material-symbols imports in
+  `src/renderer/src/main.tsx` (keep self-hosted).
+- The only not-run automated check remains `verify:clickup` (live; needs a `pk_` in `.env.local` + network)
+  and the spine's optional "packaged app renders fonts with network BLOCKED" visual check — neither is a v0 blocker.
 
 ## Open threads / do-not-relitigate (settled)
 - **Stage-6 settled decisions (accepted, reviewed):**
@@ -111,6 +104,10 @@ clean-install + reboot. Ask Luca to:
      Its "new-session refetch over cache" is the OFFLINE cache render; the network refetch is covered by
      `verify:clickup`, not here (the harness has no network — by design).
   4. **NSIS + portable both ship**, each with a distinct `artifactName` (avoid the `.exe` overwrite).
+  5. **Status filter stays MULTI-SELECT with OR (union) semantics** — ticking "to do" + "in progress"
+     shows tasks in EITHER status (AND'd against "Assigned to me"). Luca queried whether ticking multiple
+     "makes sense", then accepted the union reasoning — **decided: NO change** (`applyPausedFilter` in
+     `src/renderer/src/flyout/filter.ts`). Don't switch it to single-select.
 - **Carry-forwards (still holding, grep-verified none re-introduced):** local event log = source of truth;
   **NO ClickUp push in v0** (client is GET-only); per-task elapsed = union; tray tooltip = union (never a
   per-task sum); refresh = metadata-only, never touches intervals / never interrupts a running card;
