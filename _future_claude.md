@@ -1,163 +1,146 @@
 # Handoff — for the next Claude session
-*Written: 2026-07-01 15:05. Single rolling handoff — overwrites the prior one; reflects current state.*
+*Written: 2026-07-01 20:45. Single rolling handoff — overwrites the prior one; reflects current state.*
 
 ## Overall goal (anchor)
 Build **Cadence** — a Windows 11 system-tray time tracker whose differentiator is tracking multiple
 tasks **in parallel**; ClickUp read-only, local-first, pixel-faithful to the `3a` flyout. Hands-off
 **dogfood** build. (Charter: `CLAUDE.md`. Plan: `IMPLEMENTATION_PLAN.md`. Spine: `VERIFICATION_SPINE.md`.)
 
-## ✅ Stage 5b (refresh / resilience / rate-limit / filters / connect-state) is DONE, reviewed (3-lens panel), all findings fixed, every gate green. Next stop: **Stage 6 — persistence hardening, packaging & ship (the final phase; T2 human gate).**
-Stage 5b turned the raw 5a launch fetch into a resilient, cache-first, user-connectable integration:
-offline-safe cache, metadata-only refresh (tray + footer), 100-req/min throttle + 429 backoff +
-per-list failure skipping, the PAUSED filter wired to the real user id + workspace statuses, and an
-in-app **safeStorage-encrypted** "Connect ClickUp" flow. Ended on the **automated review-panel gate**
-(no human review) per the spine. Committed + pushed with this handoff.
+## ✅ Stage 6 (persistence hardening, packaging & ship) — CODE COMPLETE, reviewed (3-lens panel + re-review), all findings fixed, every automated gate green, artifacts built, committed + pushed. **This is the FINAL phase. The ONLY thing left is the T2 HUMAN GATE: Luca must clean-install + reboot (see "Next actions"). Once T2 passes, v0 is SHIPPED.**
+Stage 6 turned the verified engine + integration into a shippable Windows app: a running-gated
+heartbeat writer that bounds crash-tail loss, a launch-hardening verify harness that proves the
+new-session/crash-close/no-phantom-time semantics on the built artifact, electron-builder packaging
+(NSIS installer + portable exe) with the secret/CDN/`.claude` leak paths closed, a root README, and a
+clean end-of-build secret sweep. Ended on the **automated review-panel gate + a T2 human ask** per the
+spine (the plan's only T2: clean-install on a fresh Windows session + a real reboot).
 
 ## What this session accomplished
-- **`src/main/engine/store.ts`** — added `clickup-cache.json` persistence (`ClickUpCache =
-  { currentUserId, fetchedAt, tasks }`): `readClickUpCache` (shape-guarded, drops malformed rows,
-  null on corrupt) + `writeClickUpCache` (atomic tmp+rename). Exported via `engine/index.ts`.
-- **`src/main/clickup.ts`** — resilience INSIDE the client, all injected/testable:
-  - **Sliding-window throttle** to the 100/min floor (`RATE_LIMIT_PER_MINUTE`); cap clamped `≥1`
-    (no busy-loop) and drops future-dated entries (backward-clock defense).
-  - **429 backoff** — `computeBackoffMs(headers, now, attempt)` honors `X-RateLimit-Reset` (epoch
-    **seconds**) then `Retry-After`, clamped `[0, 60s]` (the 60s cap makes the sec-vs-ms ambiguity
-    safe); bounded retries (`DEFAULT_MAX_429_RETRIES=3`), then a typed `ClickUpApiError(429)`.
-  - **Per-space / per-list skip** → `Catalogue.partial: boolean`; `/user`+`/team` stay FATAL (throw).
-    Map/dedupe now runs INSIDE the per-list try (one bad row skips its list, never the traversal).
-  - New injected deps: `sleep`, `now`, `maxRequestsPerMinute`, `maxRetriesPer429`.
-- **`src/main/token-store.ts` (new)** — the build's **secret-at-rest boundary**. `safeStorage` (DPAPI)
-  encrypt/decrypt of the `pk_` token → `clickup-token.enc` in userData. `readStoredToken` /
-  `writeStoredToken` (atomic; refuses blank + refuses plaintext when encryption unavailable) /
-  `clearStoredToken` / `hasStoredToken` / `isEncryptionAvailable`. RAW token never on disk (ciphertext
-  only) or logged. ONLY module importing `safeStorage`.
-- **`src/shared/types.ts` + `src/shared/ipc.ts` + `src/preload/index.ts`** — `ConnectionStatus`
-  (`no-token|connecting|connected|partial|offline|invalid-token`) + `CatalogueMeta`
-  (`{status, currentUserId, refreshedAt, hasToken, encryptionAvailable}`). New channels/API:
-  `getCatalogueMeta`, `refreshCatalogue`, `setClickUpToken`, `catalogueMetaUpdate` (push),
-  `openConnect` (push, tray → reveal token field) + preload wiring.
-- **`src/main/index.ts`** — the connection state machine:
-  - `resolveActiveToken(envDir?)` = `.env.local`/env (dev) → `readStoredToken()` (shipped) precedence.
-  - `loadCachedCatalogue` (cache-first launch, seeds `lastFullTasks` merge base) → `refreshCatalogue`.
-  - `refreshCatalogue(engine, {fetchFn?, envDir?})` — full success writes cache + `lastFullTasks`;
-    **PARTIAL merges over `lastFullTasks` and does NOT clobber the cache** (review fix); auth 401/403 →
-    `invalid-token`, other error → `offline` (cache kept). `refreshInFlight` guard + **`refreshQueued`
-    trailing-refresh** so a token pasted mid-fetch isn't dropped (review fix). `setCatalogueMeta`
-    push moved inside the try/finally (no stuck 'connecting').
-  - `setClickUpToken`, `registerCatalogueIpc`, tray items **"Refresh tasks"** + **"Connect ClickUp…"**
-    (`openConnectPanel`).
-- **Renderer** — `App.tsx` holds `meta` (subscribes `onCatalogueMeta` + `onOpenConnect`, 30s `now`
-  tick for the footer label), threads `currentUserId` + `now` + `connectOpen` + `onRefresh`/`onConnect`
-  into `Flyout`. `Flyout.tsx` threads `currentUserId` into `applyPausedFilter`, derives real
-  `statusOptions` from loaded rows, renders the footer refresh label + the connect prompt.
-  New `ConnectPrompt.tsx` (masked `type=password` token field), `flyout/connect.ts`
-  (`DEFAULT_META`, `shouldShowConnectPrompt`, `footerRefreshLabel`), `format.ts` `fmtRefreshedAgo`.
-  `FilterControl.tsx` takes `statusOptions`.
-- **Verify** — new `scripts/token-verify.mjs` + `npm run verify:token` + `CADENCE_TOKENTEST` branch
-  (`runTokenVerify`, window-less, injected fetch, isolated dir): **22 checks** incl. safeStorage
-  round-trip, raw token in NO userData file + never in logs, and the full state machine
-  (connected / **partial merge + cache preserved** / invalid-token / offline / no-token).
-- **Review panel (3 adversarial lenses):** integration/resilience, security/secrets (**CLEAN**),
-  spec-conformance. **Fixes applied:** (HIGH/MED, flagged by two lenses) partial refresh no longer
-  clobbers the good cache / empties the catalogue — it merges; (MED) mid-flight token paste queues a
-  trailing refresh; (MED) map/dedupe moved inside the per-list try; (LOW) throttle cap clamp + stuck-
-  connecting fix + backward-clock drop; (security LOW) fake test-token sentinel no longer starts with
-  `pk_`, and `.gitignore` now ignores `*.enc`.
+- **Fresh checkout bootstrap:** `node_modules` was absent → ran `npm ci` (624 pkgs). NOTE: this machine
+  has `core.autocrlf=true` + no `.gitattributes`, so the working tree is CRLF and `npm run lint` shows
+  ~5.1k `prettier/prettier` "Delete ␍" WARNINGS (0 errors). This is a checkout artifact only — git
+  normalizes to LF on commit (verified: `git diff --stat` shows content-only changes, no EOL churn).
+  The lint GATE passes (exit 0, 0 errors). Don't "fix" the whole tree's EOLs (huge spurious diff).
+- **`src/main/index.ts` — heartbeat writer (Stage-6 core):** `HEARTBEAT_INTERVAL_MS = 30_000`,
+  `heartbeatIntervalMs()` (override via `CADENCE_HEARTBEAT_MS` scoped to `NEWSESSIONTEST` only),
+  `startHeartbeat(engine)` — **gated on `engine.hasRunning()`** (a heartbeat only bounds an OPEN
+  interval, so idle ticks are skipped — no unbounded `worklog.jsonl` growth on a resident tray app),
+  re-entrancy-guarded, and wired inside the `if (!SMOKE && !IPCTEST)` lifecycle block (SMOKE runs on
+  REAL userData → must stay read-only). `heartbeatTimer` cleared in `will-quit` alongside `tickTimer`.
+- **`src/main/index.ts` — new-session verify harness:** `runNewSessionVerify()` + `writeNewSessionResult`
+  + `NEWSESSIONTEST*` constants + `whenReady` early-return dispatch (window-less, like clickup/token).
+  Engine import now also pulls `readWorklog, replay`. Drives the REAL launch helpers (`CadenceEngine.create`
+  crash-close, `loadCachedCatalogue` offline render, `startHeartbeat`) over a pre-seeded crashed-prior-run
+  dir and asserts **16 checks**: crash-close at max(ts)/no-phantom-time, fresh-session reset (0 totals,
+  all paused), history retained-but-scoped-out, log integrity, removed-set is session-only (remove a row
+  → hidden this session → reappears on relaunch), heartbeat-appends-while-running, idempotent relaunch.
+- **`scripts/newsession-verify.mjs` (new)** — spawner that SEEDS the isolated userData dir (a 2-days-ago
+  `worklog.jsonl` with a completed interval + a dangling OPEN interval + trailing heartbeat, a
+  `tasks-store.json`, a `clickup-cache.json`), runs the harness under `CADENCE_HEARTBEAT_MS=100`, reads
+  `newsession-result.json`, exits 0/1. Mirrors the tray/token harness pattern.
+- **`package.json`** — added `"verify:newsession": "node scripts/newsession-verify.mjs"`.
+- **`electron-builder.yml`** — `win.target: [nsis, portable]` + a `portable` block with a DISTINCT
+  `artifactName` (both are `.exe` → would collide otherwise). Hardened `files` excludes: added
+  **`!.claude/**`** (electron-builder does NOT honor `.gitignore`, so a gitignored `.claude/settings.local.json`
+  would otherwise ride into the PUBLIC installer), `!vitest.config.*`, `!**/*.enc`, `!**/*.map`, and made
+  `src`/`scripts`/`TimeTracker-handoff`/`.vscode` globs recursive (`/**`). Added top-level **`publish: null`**
+  to suppress the auto-inferred GitHub `app-update.yml`/`latest.yml` (no electron-updater dep → inert, but
+  keeps the artifact honest; no attacker-pointable channel).
+- **`README.md` (new, repo root)** — what Cadence is, install (NSIS vs portable), usage, **Connect ClickUp**
+  (in-app token, safeStorage-encrypted, no file editing), where data lives (`%APPDATA%\Cadence\` + the 4
+  files), dev + verify-harness commands.
+- **Review panel (3 adversarial lenses: spec-conformance, security/release, correctness/edge-cases) + a
+  re-review pass.** Findings, all FIXED & re-verified:
+  - (MED, correctness) idle heartbeat = unbounded log growth → gated on `hasRunning()`.
+  - (MED, security) `.claude/**` (+ maps/enc/vitest) could ship into the PUBLIC installer → excluded;
+    rebuilt + asar-scanned to confirm gone.
+  - (MED, spec) the "removed-set cleared" harness assertion was vacuous → now actually removes a row and
+    proves it reappears on relaunch; heartbeat assertion now starts a task first (required by the gate).
+  - (LOWs) `CADENCE_HEARTBEAT_MS` scoped to NEWSESSIONTEST; re-entrancy guard; precondition counts stops
+    not events; `crashCloses.every` guarded against empty; `app-update.yml` suppressed.
+  - Re-review verdict: **fixes correct and regression-free, no new/remaining findings.**
 
 ## Current state
-- **Stage 5b complete, reviewed, all findings fixed, all gates green, committed + pushed.** Working tree
-  clean after commit.
-- **All gates:** `npm run typecheck` clean · `npm run lint` clean · `npm test` **123 passed**
-  (57 engine [13 engine + 31 derive + 19 store — store now +5 cache] + 12 filter + 20 window + **21
-  clickup** + **7 connect**) · `npm run build` clean · `npm run smoke` 5/5 · `npm run verify:ipc` 12/12 ·
-  `npm run verify:tray` 13/13 · `npm run verify:clickup` **10/10 (LIVE real workspace)** ·
-  **`npm run verify:token` 22/22**.
-- **Docs-check PASS** (spine Stage-5 precondition): ClickUp v2 Free-plan rate limit = 100 req/min,
-  429 on exceed, `X-RateLimit-Reset` = Unix timestamp — matches the client; `Retry-After` is not
-  documented by ClickUp (we prefer reset, fall back to it). Source: developer.clickup.com/docs/rate-limits.
-- Launch the app now: it renders the cached catalogue instantly, then refreshes live from ClickUp; no
-  token → "Connect ClickUp" prompt; tray has Refresh + Connect. Filter narrows PAUSED by
-  assignee/status.
-- Secret hygiene verified: `.env.local` gitignored (`*.local`) & untracked; every `pk_` in tracked
-  files is a test fixture; the token blob is `*.enc` (ignored) and only ever in userData; GET-only.
+- **Stage 6 code complete, reviewed, all findings fixed, all automated gates green, committed + pushed.**
+  Working tree clean apart from this handoff.
+- **All gates:** `npm run typecheck` clean · `npm run lint` **0 errors** (CRLF warnings = checkout artifact) ·
+  `npm test` **123 passed** · `npm run build` clean · `npm run smoke` PASS · `npm run verify:ipc` PASS ·
+  `npm run verify:tray` PASS · `npm run verify:token` 22/22 · **`npm run verify:newsession` 16/16** ·
+  `npm run build:win` → **`dist/cadence-0.0.0-setup.exe` (NSIS) + `dist/cadence-0.0.0-portable.exe`** (~112 MB each).
+  NOT re-run this session: `npm run verify:clickup` (live — needs a `pk_` token in `.env.local` + network;
+  `.env.local` is ABSENT on this fresh checkout; it's a Stage-5 gate, not a Stage-6 requirement).
+- **Packaged-artifact scans (automated half of the Stage-6 missing_checks):** `app.asar` has **0**
+  `fonts.googleapis`/`fonts.gstatic` refs and 184 bundled local font files (no CDN leak); `.claude`/`src`/
+  `scripts`/`vitest.config` NOT in the asar; `app-update.yml`/`latest.yml` suppressed; NO `pk_` token
+  anywhere in `dist/`.
+- **Secret sweep (spine end-of-build) — CLEAN:** working tree + FULL git history contain no real `pk_`
+  token, no `.env*`/`.enc` file ever committed, no real-token-shaped string in history. Every tracked `pk_`
+  is a doc placeholder (`pk_xxx`) or a short fake test fixture (`pk_abc`, `pk_x`…); the token-verify
+  sentinel deliberately avoids the `pk_` prefix. `.gitignore` covers `.env.*`/`*.local`/`*.enc`/`dist`/`out`.
+  `dist/` (the 112 MB exes) is gitignored (uncommittable).
 
-## Next actions (priority order) — Stage 6: persistence hardening, packaging & ship (FINAL phase)
-Read `IMPLEMENTATION_PLAN.md` **Phase 6** + `VERIFICATION_SPINE.md` **Stage 6** `missing_checks` first.
-This is a **hard gate ending in a T2 human ask** (only Luca can clean-install + reboot).
-1. **New-session launch hardening:** confirm each launch refetches over cache, clears the removed-set,
-   resets session timers/total to 0, all paused; history log intact; prior-crash open intervals closed
-   (no phantom time) without affecting the fresh session. (Most of this already holds in the engine —
-   verify + add any missing checks.)
-2. **Heartbeat writer (~30s)** — `engine.heartbeat()` exists but isn't wired to a timer; add it in
-   `index.ts` (bounds crash-tail loss). Clear it on quit like `tickTimer`.
-3. **Package with electron-builder:** Windows **NSIS installer + portable exe**; app icon; autostart
-   wired into the installed build; single-instance confirmed; **self-hosted fonts confirmed offline**
-   (no CDN leak in the PACKAGED build, per the Stage-6 missing_check — test with the network blocked).
-4. **Short root `README.md`:** install, where data lives (userData), how to set the token (in-app
-   Connect ClickUp — no file editing needed in the shipped app).
-5. **End-of-build secret sweep** (spine): working tree **AND git history** contain no `pk_` token,
-   `.env.local`, or `safeStorage`/`.enc` blob; `.gitignore` covers them; grep logs for `pk_`.
-6. **Stage 6 verification** = automated (new-session reset + log-history integrity + NSIS/portable
-   build produced + packaged-fonts-offline) + review panel (spec-conformance reset/crash-close +
-   security/release) → then the **T2 human gate**: ASK Luca to clean-install on a fresh Windows session
-   (starts on login, lives in tray, reads ClickUp, tracks parallel timers) and reboot (0 totals,
-   autostart, no phantom time). Auto-`/future-claude` before handing back.
+## Next actions (priority order) — the T2 HUMAN GATE (only Luca can do this) → then v0 is SHIPPED
+There is **no more autonomous code work** for v0. The plan's single remaining acceptance is the T2
+clean-install + reboot. Ask Luca to:
+1. **Install:** run `dist\cadence-0.0.0-setup.exe` (or the portable exe) on a real Windows session.
+   SmartScreen may warn (unsigned v0) → *More info → Run anyway*.
+2. **First-run acceptance:** confirm it (a) lives in the tray (click → flyout above the taskbar),
+   (b) **Connect ClickUp…** from the tray menu, paste a `pk_` token → the real catalogue loads into PAUSED,
+   (c) start several timers in parallel and see them tick independently; the "Current session" total +
+   tray tooltip show the wall-clock UNION (parallel overlaps counted once).
+3. **Reboot acceptance:** reboot Windows and confirm (a) Cadence **auto-starts on login** into the tray
+   (the deferred Phase-4 autostart proof), (b) it opens a **clean new session** — 0 totals, all paused,
+   session-removed rows reappear — with **no phantom time**, and (c) the ClickUp catalogue re-fetches.
+4. **(Optional but in the spine) offline-fonts on the PACKAGED build:** block the network and confirm the
+   installed app still renders Space Grotesk / Work Sans / Material Symbols (the automated half — 0 CDN
+   refs in the asar — is already done; only the visual-with-network-blocked half needs a human).
+- **If T2 passes:** v0 is done — tag/announce as Luca wishes; auto-`/future-claude` to record "SHIPPED".
+- **If T2 fails:** capture the exact symptom. Likely suspects & where to look: autostart not firing →
+  `applyAutostart`/`app.setLoginItemSettings` in `src/main/index.ts` (only runs `if (app.isPackaged)`);
+  phantom time after reboot → `CadenceEngine.create` crash-close (engine.ts:72-96) + the heartbeat cadence;
+  blank panel offline → `loadCachedCatalogue`/`clickup-cache.json`; missing glyphs/fonts → the Fontsource/
+  material-symbols imports in `src/renderer/src/main.tsx` (must stay self-hosted).
 
 ## Open threads / do-not-relitigate (settled)
-- **Stage-5b settled decisions (accepted, some flagged by the review panel):**
-  1. **Partial refresh = merge, not replace; cache untouched on partial.** A partial fetch keeps the
-     last-good-FULL cache as the offline snapshot and merges fetched rows over `lastFullTasks` so
-     skipped-list tasks don't vanish. `refreshedAt` is NOT advanced on partial (honest staleness with
-     the `partial` status). Don't "simplify" this back to an unconditional setCatalogue+writeCache.
-  2. **Status filter chips come from the LOADED tasks' distinct statuses, not the full workspace status
-     catalog.** Deliberate — fetching per-list status definitions is scope creep for v0. (LOW review nit,
-     accepted.) Real ClickUp statuses render lowercase (e.g. "to do") — cosmetic, self-consistent.
-  3. **Encryption-unavailable → refuse to persist the token** (no plaintext fallback) + warn in the
-     connect UI. DPAPI is effectively always available for a logged-in Windows user; acceptable for v0.
-  4. **The trailing-refresh (`refreshQueued`) always uses DEFAULT deps** (real transport + token source),
-     never a harness's injected fetch — the token-verify harness awaits sequentially so it never fires.
-  5. **`refreshCatalogue`/`setClickUpToken` IPC handlers return the IMMEDIATE meta** (usually
-     'connecting'); the async fetch pushes transitions via `catalogueMetaUpdate` — the renderer never
-     blocks on a multi-second round-trip.
-- **Carry-forwards (still holding, grep-verified none re-introduced):** local event log = source of
-  truth; **NO ClickUp push in v0** (client is GET-only); per-task elapsed = union; tray tooltip = union
-  (never a per-task sum); `pausedCount` never shrinks under the filter (filter narrows what RENDERS,
-  not the count); `sessionWorkedMs` in ms; **refresh = metadata-only, never touches intervals / never
-  interrupts a running card** (engine.setCatalogue rewrites only the catalogue map + tasksStore; a
-  running manual/ClickUp task survives via tasksStore+runningIds); self-hosted fonts; `sandbox:true`;
-  `*.md` in `.prettierignore`; do NOT re-litigate the `3a` look (Luca signed it off, T3); `glyph`
-  carried but not rendered; renderer is a pure projection (never re-sums/re-sorts).
-- **Multi-monitor positioning** stays deferred (primary display only). Deferred-not-in-v0 list holds
-  (no summaries, no permanent delete/rename, no full idle detection, no presence layer).
+- **Stage-6 settled decisions (accepted, reviewed):**
+  1. **Heartbeat is gated on `hasRunning()`** and only wired for the real runtime (+ TRAYTEST), never
+     SMOKE/IPCTEST. Don't "simplify" it to fire unconditionally — that reintroduces unbounded idle log growth.
+  2. **`electron-builder.yml` excludes are load-bearing, not cosmetic** — `!.claude/**` in particular
+     prevents a gitignored local file leaking into a PUBLIC installer (electron-builder ignores `.gitignore`).
+     Keep the excludes recursive. `publish: null` is deliberate (suppress the inferred update channel).
+  3. **The new-session harness proves LAUNCH WIRING, not engine internals** (those are Stage-2 unit tests).
+     Its "new-session refetch over cache" is the OFFLINE cache render; the network refetch is covered by
+     `verify:clickup`, not here (the harness has no network — by design).
+  4. **NSIS + portable both ship**, each with a distinct `artifactName` (avoid the `.exe` overwrite).
+- **Carry-forwards (still holding, grep-verified none re-introduced):** local event log = source of truth;
+  **NO ClickUp push in v0** (client is GET-only); per-task elapsed = union; tray tooltip = union (never a
+  per-task sum); refresh = metadata-only, never touches intervals / never interrupts a running card;
+  `pausedCount` drops on REMOVE but NOT under the view-only filter; `sessionWorkedMs` in ms; token only
+  ever `safeStorage`-encrypted at rest (`clickup-token.enc`, `*.enc`-ignored); self-hosted fonts;
+  `sandbox:true`; `*.md` in `.prettierignore`; renderer is a pure projection; do NOT re-litigate the `3a`
+  look (Luca signed it off, T3); multi-monitor positioning stays deferred (primary display only).
+- **Deferred-not-in-v0 (unchanged):** ClickUp time-entry push, separate task-management/session-confirm
+  screen, permanent delete/rename, full idle detection, daily/weekly summaries, presence layer, output metric.
 
 ## Pointers
-- **Build root must be local** (laptop C:), not `G:\Other computers\…`. Commands: `npm run dev` ·
-  `npm test` (123) · `npm run typecheck` · `npm run lint` · `npm run build` · `npm run smoke` ·
-  `npm run verify:ipc` · `npm run verify:tray` · `npm run verify:clickup` (5a live real-data) ·
-  **`npm run verify:token`** (5b safeStorage + connect state machine).
-- **Stage-5b code:** `src/main/clickup.ts` (throttle/429/skip/partial) · `src/main/token-store.ts`
-  (safeStorage) · `src/main/index.ts` (`refreshCatalogue` state machine, `loadCachedCatalogue`,
-  `setClickUpToken`, `registerCatalogueIpc`, tray items, `runTokenVerify`, `CADENCE_TOKENTEST`) ·
-  `src/main/engine/store.ts` (`clickup-cache.json`) · `src/shared/{types,ipc}.ts` · `src/preload/index.ts`
-  · renderer: `App.tsx`, `flyout/{Flyout,ConnectPrompt,FilterControl}.tsx`, `flyout/{connect,format}.ts` ·
-  `scripts/token-verify.mjs`.
-- **Phase-5 engine entry point:** `engine.setCatalogue(tasks)` (metadata-only; one atomic store write;
-  never touches the worklog). `engine.heartbeat()` exists — Stage 6 wires the ~30s timer.
-- **Persistence** (`src/main/engine/store.ts`): `worklog.jsonl` (source of truth) + `tasks-store.json`
-  (metadata snapshot) + **`clickup-cache.json`** (last-good-full catalogue, offline). Token blob:
-  `clickup-token.enc` (userData, `safeStorage`-encrypted, `*.enc`-ignored).
-- **Verify harnesses** all mirror one pattern: a `CADENCE_*` env branch in `src/main/index.ts` + a
-  `scripts/*.mjs` spawner on an isolated userData dir (`smoke`/`ipc`/`tray`/`clickup`/**`token`**). The
-  clickup + token harnesses are window-less; token strips `CLICKUP_TOKEN` from the child env and greps
-  the child's logs for the fake sentinel.
-- Plan: `IMPLEMENTATION_PLAN.md` (**Phase 6** next — packaging & ship) · Spine: `VERIFICATION_SPINE.md`
-  (**Stage 6**, HARD gate, `missing_checks` = packaged-fonts-offline, autostart-after-reboot,
-  new-session reset on packaged build, secret sweep) · Charter: `CLAUDE.md`. Doctrine: no human review
-  of routine diffs; mandatory autonomous review panel after every non-trivial phase; human gates only at
-  T1/T2/T3 (**Stage 6 is the T2 gate** — clean-install + reboot); one phase = one bounded session;
-  auto-`/future-claude` before every handoff.
+- **Build root must be local** (laptop C:), not `G:\Other computers\…`. On a fresh checkout run `npm ci`
+  first (node_modules is gitignored). Commands: `npm run dev` · `npm test` (123) · `npm run typecheck` ·
+  `npm run lint` (0 errors; CRLF warnings are a local checkout artifact) · `npm run build` · `npm run smoke` ·
+  `npm run verify:ipc` · `npm run verify:tray` · `npm run verify:token` · **`npm run verify:newsession`** (Stage 6) ·
+  `npm run verify:clickup` (live, needs `.env.local`) · **`npm run build:win`** (→ NSIS + portable in `dist/`).
+- **Stage-6 code:** `src/main/index.ts` (heartbeat writer §~505-538; `runNewSessionVerify` §~1420-1560;
+  `NEWSESSIONTEST` dispatch in `whenReady`; `startHeartbeat` call in the lifecycle block; `will-quit` cleanup) ·
+  `scripts/newsession-verify.mjs` · `electron-builder.yml` (win target + `files` excludes + `publish: null`) ·
+  `README.md` · `package.json` (`verify:newsession`).
+- **Engine (unchanged this stage):** `CadenceEngine.create` does crash-close + fresh session (engine.ts:72-96);
+  `engine.heartbeat()` appends a global heartbeat; `engine.setCatalogue` is metadata-only; `derive.ts` filters
+  `removed` out of `paused` + sets `pausedCount = paused.length`.
+- **Persistence** (`src/main/engine/store.ts`): `worklog.jsonl` (truth) + `tasks-store.json` (metadata snapshot)
+  + `clickup-cache.json` (offline catalogue). Token blob: `clickup-token.enc` (userData, safeStorage, `*.enc`-ignored).
 - GitHub: `https://github.com/LucaChech/time_tracker` (PUBLIC, `main`, `origin`). gh authed as `LucaChech`.
-  Real `pk_` token only in untracked `.env.local`; in the shipped app it lives `safeStorage`-encrypted.
+  Real `pk_` token only in untracked `.env.local` (ABSENT on this checkout); in the shipped app it lives
+  `safeStorage`-encrypted, entered via the in-app **Connect ClickUp** flow.
 - ClickUp: base `https://api.clickup.com/api/v2`; header `Authorization: <pk_token>` (**no `Bearer`**);
-  workspace id `90121836206`; user id `302553911`; Free plan → `custom_id` null, lists no API color,
-  **100 req/min** floor, 429 + `X-RateLimit-Reset` (epoch seconds). Use Node `fetch`, not curl.
+  workspace `90121836206`; user `302553911`; Free plan → `custom_id` null, lists no API color, 100 req/min.
+- Doctrine (spine): no human review of routine diffs; mandatory autonomous review panel after every non-trivial
+  phase (done for Stage 6 + a re-review); human gates only at T1/T2/T3 — **Stage 6 IS the T2 gate**
+  (clean-install + reboot); one phase = one bounded session; auto-`/future-claude` before every handoff.

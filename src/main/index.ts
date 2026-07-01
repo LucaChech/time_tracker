@@ -21,7 +21,7 @@ import type {
   StateSnapshot,
   Task
 } from '@shared/types'
-import { CadenceEngine, readClickUpCache, writeClickUpCache } from './engine'
+import { CadenceEngine, readClickUpCache, writeClickUpCache, readWorklog, replay } from './engine'
 import { computeFlyoutPosition } from './window/position'
 import { formatTrayTooltip, shouldHideOnBlur } from './window/format'
 import { fetchCatalogue, resolveToken, CLICKUP_PALETTE, ClickUpApiError } from './clickup'
@@ -111,11 +111,23 @@ const TOKENTEST = process.env.CADENCE_TOKENTEST === '1'
 const TOKENTEST_OUT = process.env.CADENCE_TOKENTEST_OUT
 const TOKENTEST_DIR = process.env.CADENCE_TOKENTEST_DIR
 
+// Stage-6 new-session / persistence-hardening harness. When CADENCE_NEWSESSIONTEST=1
+// the app runs a WINDOW-LESS check on an ISOLATED userData dir (CADENCE_NEWSESSIONTEST_DIR)
+// that the spawner has pre-seeded with a worklog (history + a prior-crash OPEN interval),
+// a tasks-store, and a clickup-cache. It drives the REAL launch helpers (engine.create →
+// crash-close, loadCachedCatalogue → offline render, startHeartbeat → the ~30s writer) and
+// asserts new-session reset, log-history integrity, no phantom time, and the heartbeat
+// writer actually appends. Driven by scripts/newsession-verify.mjs; writes
+// newsession-result.json to CADENCE_NEWSESSIONTEST_OUT. Off in normal use.
+const NEWSESSIONTEST = process.env.CADENCE_NEWSESSIONTEST === '1'
+const NEWSESSIONTEST_OUT = process.env.CADENCE_NEWSESSIONTEST_OUT
+const NEWSESSIONTEST_DIR = process.env.CADENCE_NEWSESSIONTEST_DIR
+
 // Any automated harness. Harnesses run the unpackaged build via `electron .`, so
 // `is.dev` (= !app.isPackaged) is TRUE for them — but they must behave like the
 // shipped app (hidden start, hide-on-blur). `isDevMode` is the real "developer is
 // running `npm run dev`" flag: dev, and not under a harness.
-const HARNESS = SMOKE || IPCTEST || TRAYTEST || CLICKUPTEST || TOKENTEST
+const HARNESS = SMOKE || IPCTEST || TRAYTEST || CLICKUPTEST || TOKENTEST || NEWSESSIONTEST
 const isDevMode = is.dev && !HARNESS
 
 let mainWindow: BrowserWindow | null = null
@@ -130,6 +142,8 @@ let smokeDone = false
 const rendererErrors: string[] = []
 // The 1s display-tick handle, cleared on quit so the interval never outlives the app.
 let tickTimer: ReturnType<typeof setInterval> | null = null
+// The ~30s heartbeat-writer handle (Stage 6), cleared on quit alongside the tick.
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null
 
 // ── Stage 5b: ClickUp integration (connection) state ─────────────────────────
 // The live state of the external integration, pushed to the renderer on its own
@@ -499,6 +513,37 @@ function startTick(engine: CadenceEngine): void {
     if (!engine.hasRunning()) return
     pushState(engine.getState())
   }, 1000)
+}
+
+// The heartbeat writer's cadence. A periodic global heartbeat (taskId null, ignored
+// for running-state) advances the `max(ts)` that crash-close uses to bound a dangling
+// interval — so an ungraceful exit loses at most one heartbeat's worth of tail, not
+// the whole open span since the last start. ~30s trades a tiny append rate for a tight
+// crash bound. The new-session harness overrides it to a short interval to prove the
+// writer fires without waiting 30s; that override is scoped to that one harness.
+const HEARTBEAT_INTERVAL_MS = 30_000
+function heartbeatIntervalMs(): number {
+  if (NEWSESSIONTEST) {
+    const override = Number(process.env.CADENCE_HEARTBEAT_MS)
+    if (Number.isFinite(override) && override > 0) return override
+  }
+  return HEARTBEAT_INTERVAL_MS
+}
+
+/**
+ * Start the ~30s heartbeat writer. It appends a heartbeat ONLY while a timer is running
+ * — mirroring the display tick's `hasRunning()` guard. A heartbeat exists solely to bound
+ * the crash-tail of an OPEN interval, and an interval can only be open when something is
+ * running; a heartbeat written while fully idle would bound nothing and just grow the
+ * append-only `worklog.jsonl` (which is re-read every launch) for a resident tray app.
+ * Re-entrancy-guarded and cleared on quit like the display tick, so it never leaks or
+ * outlives the app.
+ */
+function startHeartbeat(engine: CadenceEngine): void {
+  if (heartbeatTimer) return
+  heartbeatTimer = setInterval(() => {
+    if (engine.hasRunning()) engine.heartbeat()
+  }, heartbeatIntervalMs())
 }
 
 // ── Stage 5b: ClickUp connection state machine ───────────────────────────────
@@ -1354,6 +1399,197 @@ async function runTokenVerify(): Promise<void> {
   }
 }
 
+function writeNewSessionResult(ok: boolean, results: VerifyResult[], error: string | null): void {
+  if (!NEWSESSIONTEST_OUT) return
+  mkdirSync(NEWSESSIONTEST_OUT, { recursive: true })
+  writeFileSync(
+    join(NEWSESSIONTEST_OUT, 'newsession-result.json'),
+    JSON.stringify({ ok, results, error }, null, 2)
+  )
+}
+
+/**
+ * Stage-6 new-session / persistence-hardening verify (window-less). The spawner has
+ * pre-seeded the isolated userData dir with a realistic PRIOR state: a `worklog.jsonl`
+ * carrying history (a completed interval from an earlier session) PLUS a dangling OPEN
+ * interval and a trailing heartbeat (a prior crash), a `tasks-store.json`, and a
+ * `clickup-cache.json`. This drives the REAL launch helpers — `CadenceEngine.create`
+ * (crash-close + fresh session), `loadCachedCatalogue` (offline render from cache), and
+ * `startHeartbeat` (the ~30s writer, sped up via CADENCE_HEARTBEAT_MS) — and proves the
+ * whole launch is hardened:
+ *   - the prior-crash open interval is closed in the log at `max(ts)` (no phantom time);
+ *   - a fresh session: every task paused, 0 running, session total + per-task session
+ *     elapsed all 0, while all-time history is retained (not counted this session);
+ *   - the removed-set is session-only: removing a row hides it this session but it
+ *     reappears on the next launch (never persisted);
+ *   - the history log is intact (prior events still present);
+ *   - the heartbeat writer appends while a timer runs;
+ *   - a SECOND launch on the same dir finds nothing to crash-close (idempotent).
+ * Writes newsession-result.json and exits 0/1.
+ */
+async function runNewSessionVerify(): Promise<void> {
+  const results: VerifyResult[] = []
+  const A = (name: string, cond: boolean, detail: unknown = ''): void => {
+    results.push({ name, pass: !!cond, detail: String(detail) })
+  }
+  try {
+    if (!NEWSESSIONTEST_DIR) {
+      writeNewSessionResult(
+        false,
+        [],
+        'CADENCE_NEWSESSIONTEST_DIR not set — refusing to touch real userData'
+      )
+      app.exit(1)
+      return
+    }
+    app.setPath('userData', NEWSESSIONTEST_DIR)
+    const dir = app.getPath('userData')
+
+    // Snapshot the SEEDED log (before launch) so we can prove crash-close is additive
+    // and history survives. The seed carries a dangling open interval + a heartbeat.
+    const seeded = readWorklog(dir)
+    const seededMaxTs = seeded.reduce((m, e) => (e.ts > m ? e.ts : m), 0)
+    const seededTimelines = replay(seeded)
+    const seedOpenIds = [...seededTimelines].filter(([, tl]) => tl.open !== null).map(([id]) => id)
+    A(
+      'precondition: seed has a dangling OPEN interval (a prior crash)',
+      seedOpenIds.length > 0,
+      seedOpenIds.join(',')
+    )
+    A(
+      'precondition: seed carries prior history (a completed interval)',
+      seeded.filter((e) => e.action === 'stop').length >= 1,
+      `${seeded.filter((e) => e.action === 'stop').length} stop(s)`
+    )
+
+    // 1) Real launch step: create the engine → crash-close runs, fresh session begins.
+    const engine = CadenceEngine.create({ dir, now: Date.now })
+    engineRef = engine
+
+    const afterCreate = readWorklog(dir)
+    const crashCloses = afterCreate.filter((e) => e.source === 'crash-close')
+    A(
+      'crash-close appended exactly one stop per dangling interval',
+      crashCloses.length === seedOpenIds.length,
+      `${crashCloses.length} crash-close(s)`
+    )
+    A(
+      'crash-close is a stop at max(ts) — no phantom time past the last known event',
+      crashCloses.length > 0 &&
+        crashCloses.every((e) => e.action === 'stop' && e.ts === seededMaxTs),
+      `maxTs=${seededMaxTs}`
+    )
+    const openAfterCreate = [...replay(afterCreate)].filter(([, tl]) => tl.open !== null)
+    A('no interval remains open after launch', openAfterCreate.length === 0, openAfterCreate.length)
+
+    // 2) Real launch step: render the cached catalogue offline (no network).
+    loadCachedCatalogue(engine)
+    const snap = engine.getState()
+
+    A(
+      'fresh session: nothing running (all paused)',
+      snap.active.length === 0 && snap.runningCount === 0,
+      `${snap.active.length} active`
+    )
+    A('fresh session: session total resets to 0', snap.sessionWorkedMs === 0, snap.sessionWorkedMs)
+    A(
+      'fresh session: every per-task session elapsed is 0',
+      snap.paused.every((t) => t.sessionElapsedMs === 0)
+    )
+    A(
+      'cached catalogue rendered offline (paused rows present)',
+      snap.paused.length > 0,
+      snap.paused.length
+    )
+
+    // Offline catalogue fully loaded: every cached task renders as a paused row. (The
+    // removed-set-cleared claim is proven for real in step 4 by actually removing a row.)
+    const cache = readClickUpCache(dir)
+    A(
+      'offline catalogue fully loaded (every cached task renders as paused)',
+      !!cache && snap.pausedCount === cache.tasks.length,
+      `${snap.pausedCount} vs cache ${cache?.tasks.length}`
+    )
+
+    // History retained but NOT counted this session: a task with a completed interval in
+    // an earlier session shows all-time > 0 yet session elapsed 0.
+    const withHistory = snap.paused.find((t) => t.allTimeElapsedMs > 0)
+    A(
+      'prior-session history retained (all-time > 0) but scoped OUT of this session (session == 0)',
+      !!withHistory && withHistory.sessionElapsedMs === 0,
+      withHistory
+        ? `${withHistory.name}: all=${withHistory.allTimeElapsedMs} sess=${withHistory.sessionElapsedMs}`
+        : 'no historical row'
+    )
+
+    // 3) Log-history integrity: every seeded event is still present after launch.
+    const stillPresent = seeded.every((s) =>
+      afterCreate.some((e) => e.ts === s.ts && e.taskId === s.taskId && e.action === s.action)
+    )
+    A(
+      'history log intact: every seeded event survives the new session',
+      stillPresent,
+      `${afterCreate.length} events`
+    )
+
+    // 4) Removed-set is SESSION-ONLY: removing a row hides it this session, and a fresh
+    //    launch on the same dir shows it again (the removed-set is never persisted). The
+    //    same relaunch doubles as the idempotency check — nothing is running yet, so a
+    //    second create finds no open interval to crash-close (log length unchanged).
+    engine.removeFromList('seedC')
+    const afterRemove = engine.getState()
+    A(
+      'removeFromList hides the row this session (pausedCount drops, row gone)',
+      !afterRemove.paused.some((t) => t.id === 'seedC') &&
+        afterRemove.pausedCount === snap.pausedCount - 1,
+      `pausedCount ${snap.pausedCount} -> ${afterRemove.pausedCount}`
+    )
+    const lenBeforeRelaunch = readWorklog(dir).length
+    const relaunch = CadenceEngine.create({ dir, now: Date.now })
+    const lenAfterRelaunch = readWorklog(dir).length
+    relaunch.setCatalogue(cache?.tasks ?? []) // mirror loadCachedCatalogue's offline render
+    A(
+      'second launch finds no open interval to crash-close (idempotent)',
+      lenAfterRelaunch === lenBeforeRelaunch,
+      `${lenBeforeRelaunch} -> ${lenAfterRelaunch}`
+    )
+    A(
+      'removed-set cleared next launch: the removed row reappears',
+      relaunch.getState().paused.some((t) => t.id === 'seedC')
+    )
+
+    // 5) Heartbeat writer: it appends ONLY while a timer runs (the crash-tail it bounds
+    //    exists only for an OPEN interval), so start a task first, then prove the writer
+    //    fires (CADENCE_HEARTBEAT_MS speeds it up). Count only heartbeats stamped AFTER
+    //    session start, so the seed's own marker heartbeat isn't miscounted.
+    const sessionStart = engine.getSessionStartTs()
+    engine.start('seedA')
+    startHeartbeat(engine)
+    await new Promise((r) => setTimeout(r, 400))
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer)
+      heartbeatTimer = null
+    }
+    engine.stop('seedA')
+    const newHeartbeats = readWorklog(dir).filter(
+      (e) => e.action === 'heartbeat' && e.ts >= sessionStart
+    )
+    A(
+      'heartbeat writer appends while a timer runs',
+      newHeartbeats.length >= 1,
+      `${newHeartbeats.length} new heartbeat(s)`
+    )
+
+    const ok = results.every((r) => r.pass)
+    writeNewSessionResult(ok, results, null)
+    app.exit(ok ? 0 : 1)
+  } catch (err) {
+    A('new-session verify threw', false, err instanceof Error ? err.message : String(err))
+    writeNewSessionResult(false, results, err instanceof Error ? err.message : String(err))
+    app.exit(1)
+  }
+}
+
 // Single-instance lock: the flyout is hidden by default, so a second launch must
 // SHOW + reposition the existing window (not merely focus an invisible one) — or,
 // if it raced in before the window exists, mark it for reveal on ready-to-show.
@@ -1386,6 +1622,14 @@ app.whenReady().then(() => {
   // round-trip + the connection state machine (injected fetch, no network).
   if (TOKENTEST) {
     void runTokenVerify()
+    return
+  }
+
+  // Stage-6 new-session harness: a window-less check that drives the real launch
+  // helpers over a pre-seeded crashed-prior-run dir and asserts new-session reset,
+  // crash-close (no phantom time), log integrity, and the heartbeat writer.
+  if (NEWSESSIONTEST) {
+    void runNewSessionVerify()
     return
   }
 
@@ -1438,6 +1682,10 @@ app.whenReady().then(() => {
     registerWindowIpc()
     createTray()
     wirePowerAndQuit()
+    // The heartbeat writer is part of the real runtime, so it's gated here with the
+    // rest of the app lifecycle — never under the SMOKE/IPCTEST bare-shell tests (SMOKE
+    // in particular runs on the real userData dir and must stay read-only).
+    startHeartbeat(engine)
     // Autostart only in the shipped app — a dev/`electron .` run shouldn't register
     // itself for login. The tray harness drives applyAutostart explicitly instead.
     if (app.isPackaged) applyAutostart(true)
@@ -1469,6 +1717,10 @@ app.on('will-quit', () => {
   if (tickTimer) {
     clearInterval(tickTimer)
     tickTimer = null
+  }
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer)
+    heartbeatTimer = null
   }
   tray?.destroy()
   tray = null

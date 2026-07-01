@@ -3,24 +3,42 @@ productName: Cadence
 directories:
   buildResources: build
 files:
-  - '!**/.vscode/*'
-  - '!src/*'
+  # electron-builder does NOT honor .gitignore, so every non-runtime path is excluded
+  # explicitly here. Globs are recursive (`/**`) so nested files can't slip through. The
+  # app runs entirely from `out/` (the electron-vite build); nothing below is needed at
+  # runtime. `.claude/**` is load-bearing: it holds local Claude config (some of it
+  # gitignored, e.g. settings.local.json) that must never ride into this PUBLIC installer.
+  - '!**/.vscode/**'
+  - '!.claude/**'
+  - '!src/**'
+  - '!scripts/**'
+  - '!TimeTracker-handoff/**'
   - '!electron.vite.config.{js,ts,mjs,cjs}'
+  - '!vitest.config.{js,ts,mjs,cjs}'
   - '!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
-  - '!scripts/*'
   - '!{IMPLEMENTATION_PLAN.md,VERIFICATION_SPINE.md,CLAUDE.md,_future_claude.md}'
-  - '!TimeTracker-handoff/*'
+  # Belt-and-suspenders: never pack a secret blob or source maps into the shipped asar.
+  - '!**/*.enc'
+  - '!**/*.map'
 asarUnpack:
   - 'resources/**'
 win:
   executableName: Cadence
+  # Ship both: an NSIS installer (starts on login, Start-menu + desktop shortcuts) and
+  # a single-file portable exe (no install, runs from anywhere). Both are `.exe`, so each
+  # target sets a DISTINCT artifactName below or one would overwrite the other.
+  target:
+    - nsis
+    - portable
 nsis:
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}
   uninstallDisplayName: ${productName}
   createDesktopShortcut: always
+portable:
+  artifactName: ${name}-${version}-portable.${ext}
 mac:
   entitlementsInherit: build/entitlements.mac.plist
   extendInfo:
@@ -41,6 +59,10 @@ linux:
 appImage:
   artifactName: ${name}-${version}.${ext}
 npmRebuild: false
-# No auto-update in v0 — the electron-vite template's placeholder `publish` block
-# (a generic provider pointed at example.com) was removed so no attacker-pointable
-# update channel ships. Add a real provider here if/when auto-update lands.
+# No auto-update in v0. `publish: null` is explicit: without it, electron-builder INFERS a
+# GitHub provider from package.json's repo/homepage and emits `app-update.yml` + `latest.yml`
+# into the build. Nothing reads them (there is no electron-updater dependency and no
+# autoUpdater code), so no live update channel exists either way — but suppressing the
+# metadata keeps the artifact honest and avoids a latent, unsigned update channel a future
+# phase could wire up by accident. Add a real, signed provider here if/when auto-update lands.
+publish: null

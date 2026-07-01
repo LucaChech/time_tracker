@@ -29,7 +29,8 @@
     "verify:ipc": "node scripts/ipc-verify.mjs",
     "verify:tray": "node scripts/tray-verify.mjs",
     "verify:clickup": "node scripts/clickup-verify.mjs",
-    "verify:token": "node scripts/token-verify.mjs"
+    "verify:token": "node scripts/token-verify.mjs",
+    "verify:newsession": "node scripts/newsession-verify.mjs"
   },
   "dependencies": {
     "@electron-toolkit/utils": "^4.0.0",
