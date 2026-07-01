@@ -114,6 +114,51 @@ function App(): JSX.Element {
     }
   }, [applySnapshot, onOpError])
 
+  // Content-driven window sizing (Phase 4): report the panel's natural height to
+  // main, which sizes the transparent window to fit and clamps to the work area
+  // (beyond which the PAUSED list scrolls internally). Set up once the flyout is
+  // in the DOM; a ResizeObserver on the panel + content picks up every later
+  // height change (rows added/removed, composer/filter opened, fonts loaded). A
+  // plain browser tab has no `resizeTo`, so this is inert there.
+  const ready = snapshot !== null
+  useEffect(() => {
+    const api = bridge()
+    if (!api?.resizeTo || !ready) return
+
+    let raf = 0
+    let lastReported = -1
+    const measure = (): void => {
+      const flyout = document.querySelector<HTMLElement>('.flyout')
+      const content = document.querySelector<HTMLElement>('.content')
+      if (!flyout || !content) return
+      // Chrome (titlebar + footer + borders) is clamp-invariant; content.scrollHeight
+      // is the full natural content height even while the list is scrolling — so
+      // this reports the height the panel WANTS, and main clamps it.
+      const chrome = flyout.offsetHeight - content.offsetHeight
+      const natural = chrome + content.scrollHeight
+      if (Math.abs(natural - lastReported) <= 1) return // dedup: avoid a resize/report loop
+      lastReported = natural
+      api.resizeTo(natural)
+    }
+    // Coalesce bursts of observer callbacks into one measure per frame.
+    const schedule = (): void => {
+      if (raf) cancelAnimationFrame(raf)
+      raf = requestAnimationFrame(measure)
+    }
+
+    const ro = new ResizeObserver(schedule)
+    const flyout = document.querySelector('.flyout')
+    const content = document.querySelector('.content')
+    if (flyout) ro.observe(flyout)
+    if (content) ro.observe(content)
+    document.fonts?.ready.then(schedule).catch(() => {})
+
+    return () => {
+      if (raf) cancelAnimationFrame(raf)
+      ro.disconnect()
+    }
+  }, [ready])
+
   // Operation handlers — each drives the engine over IPC and adopts the fresh
   // snapshot it returns (main also pushes on the tick; applySnapshot keeps the
   // newest). No-op without the bridge, so a click in the static fallback is inert.
@@ -141,6 +186,14 @@ function App(): JSX.Element {
     },
     [applySnapshot, onOpError]
   )
+  // Window controls (Phase 4): both hide the flyout to the tray — the session
+  // stays alive; only the tray's Quit ends it. No-op in the browser fallback.
+  const onMinimize = useCallback(() => {
+    bridge()?.minimize()
+  }, [])
+  const onClose = useCallback(() => {
+    bridge()?.close()
+  }, [])
 
   // Nothing to render until the first snapshot arrives (a single frame; the
   // window is hidden until ready-to-show in production).
@@ -154,7 +207,8 @@ function App(): JSX.Element {
       onPause={onPause}
       onRemove={onRemove}
       onAddManual={onAddManual}
-      // onMinimize / onClose are wired to tray behavior in Phase 4.
+      onMinimize={onMinimize}
+      onClose={onClose}
     />
   )
 }

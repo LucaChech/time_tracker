@@ -32,7 +32,16 @@ export const IpcChannels = {
   /** Renderer → main → fresh snapshot after session-hiding a paused row. */
   removeFromList: 'cadence:remove-from-list',
   /** Main → renderer (push). A fresh snapshot on the 1s tick while timers run. */
-  stateUpdate: 'cadence:state-update'
+  stateUpdate: 'cadence:state-update',
+
+  // ── Stage 4 window surface (fire-and-forget; the window has no return value) ──
+  /** Renderer → main. Title-bar minimize → hide the flyout to the tray. */
+  minimizeWindow: 'cadence:window-minimize',
+  /** Renderer → main. Title-bar close → hide to the tray (session stays alive). */
+  closeWindow: 'cadence:window-close',
+  /** Renderer → main. Report the panel's natural content height (px) so main can
+   *  size the transparent window to it (content-driven height + internal scroll). */
+  resizeWindow: 'cadence:window-resize'
 } as const
 
 export interface AppInfo {
@@ -84,4 +93,14 @@ export interface CadenceApi {
    * with each new snapshot; returns an unsubscribe that detaches the listener.
    */
   onStateUpdate: (cb: (state: StateSnapshot) => void) => () => void
+
+  // ── Stage 4 window surface ────────────────────────────────────────────────
+  /** Minimize: hide the flyout to the tray. Fire-and-forget. */
+  minimize: () => void
+  /** Close (×): hide the flyout to the tray — the session stays alive; only the
+   *  tray menu's Quit ends it. Fire-and-forget. */
+  close: () => void
+  /** Report the panel's natural content height (px) so main sizes the window to
+   *  fit, clamping to the work area (then the PAUSED list scrolls). Fire-and-forget. */
+  resizeTo: (panelHeight: number) => void
 }

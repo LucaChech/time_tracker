@@ -28,7 +28,12 @@ const api: CadenceApi = {
     const listener = (_event: IpcRendererEvent, state: StateSnapshot): void => cb(state)
     ipcRenderer.on(IpcChannels.stateUpdate, listener)
     return () => ipcRenderer.removeListener(IpcChannels.stateUpdate, listener)
-  }
+  },
+
+  // Stage 4 window surface — fire-and-forget; main owns all window geometry.
+  minimize: () => ipcRenderer.send(IpcChannels.minimizeWindow),
+  close: () => ipcRenderer.send(IpcChannels.closeWindow),
+  resizeTo: (panelHeight: number) => ipcRenderer.send(IpcChannels.resizeWindow, panelHeight)
 }
 
 if (process.contextIsolated) {

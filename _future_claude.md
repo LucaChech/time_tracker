@@ -1,162 +1,163 @@
 # Handoff — for the next Claude session
-*Written: 2026-07-01 10:13. Single rolling handoff — overwrites the prior one; reflects current state.*
+*Written: 2026-07-01 11:20. Single rolling handoff — overwrites the prior one; reflects current state.*
 
 ## Overall goal (anchor)
 Build **Cadence** — a Windows 11 system-tray time tracker whose differentiator is tracking multiple
 tasks **in parallel**; ClickUp read-only, local-first, pixel-faithful to the `3a` flyout. Hands-off
 **dogfood** build. (Charter: `CLAUDE.md`. Plan: `IMPLEMENTATION_PLAN.md`. Spine: `VERIFICATION_SPINE.md`.)
 
-## ✅ Stage 3b (wire UI ↔ engine over IPC) is DONE, reviewed (both panel lenses SOUND), all gates green, review fixes applied. Next stop: **Stage 4 — Tray & window behavior (the "flyout" feel).**
-Stage 3b wired the signed-off static `3a` flyout to the Stage-2 engine over typed IPC. The renderer is
-now a **live pure projection** of the engine's `StateSnapshot`; all timing/union/sort math stays in
-main/engine. Ended on the **automated review-panel gate** (no human review) per the spine — both
-adversarial lenses (spec-conformance/pure-projection + edge-cases/transitions) returned **SOUND**;
-their minor findings were fixed. Committed + pushed with this handoff.
+## ✅ Stage 4 (Tray & window behavior — the "flyout" feel) is DONE, reviewed (3-lens panel), all gates green, review fixes applied. Next stop: **Stage 5 — ClickUp READ integration (recommend split 5a/5b).**
+Stage 4 gave the signed-off flyout its OS integration: a tray (tooltip = session total), click-to-toggle
+positioned above the taskbar clamped to the work area, content-driven window sizing, minimize/close →
+hide-to-tray (Quit only via tray), auto-pause on suspend/lock/quit, hide-on-blur with a dev/DevTools
+exception, autostart (when packaged), and a single-instance show+reposition. Ended on the **automated
+review-panel gate** (no human review) per the spine — this stage's human proof (autostart-after-reboot)
+is rolled into the **Stage 6** human gate. Committed + pushed with this handoff.
 
 ## What this session accomplished
-- **IPC contract** (`src/shared/ipc.ts`): added domain channels (`getState`/`start`/`stop`/
-  `addManualTask`/`removeFromList` + a `stateUpdate` push channel) and extended `CadenceApi` with
-  those methods + `onStateUpdate(cb) => unsubscribe`. Imports `StateSnapshot`/`ManualTaskInput` from
-  `@shared/types`.
-- **`ManualTaskInput` moved** to `src/shared/types.ts` (single source); `src/main/engine/engine.ts`
-  imports + re-exports it, so `engine/index.ts`'s re-export chain is unchanged. This lets the IPC
-  layer + renderer reference the shape **without importing from `src/main`** (renderer keeps its own
-  `ManualDraft`, which is structurally assignable to `ManualTaskInput`).
-- **Preload bridge** (`src/preload/index.ts`): thin `invoke` wrappers for the domain ops;
-  `onStateUpdate` registers a unique `ipcRenderer.on` listener and returns an unsubscribe that removes
-  that exact listener (no leak; StrictMode-safe).
-- **Main** (`src/main/index.ts`): instantiates `CadenceEngine.create({ dir: app.getPath('userData'),
-  now: Date.now })` after `whenReady`; `registerDomainIpc` (each op runs on the engine then returns
-  the fresh `getState()`); a **1s tick** (`startTick`) that pushes a fresh snapshot **only while a
-  timer runs** (`engine.hasRunning()` O(1) gate — skips the re-derive when idle); `broadcastState`
-  guards `isDestroyed()`; `tickTimer` cleared on `will-quit`. Handlers guard ids with
-  `engine.hasTask()` and sanitize the manual-task payload at the trust boundary.
-- **Engine** (`src/main/engine/engine.ts`): added `hasRunning()` and `hasTask(id)` accessors (both
-  O(1)); no change to the tested derivation logic.
-- **Snapshot** (`src/shared/types.ts` + `src/main/engine/derive.ts`): added **`derivedAt: number`**
-  (= the `now` a snapshot was derived at). Fixtures updated to carry it.
-- **Renderer** (`src/renderer/src/App.tsx`): replaced the fixture with a live `getState()` +
-  `onStateUpdate` subscription; wired `onPlay→start`, `onPause→stop`, `onRemove→removeFromList`,
-  `onAddManual→addManualTask`. `onMinimize`/`onClose` intentionally **left unwired** (Phase 4 stubs).
-  A `bridge()` accessor returns the IPC surface or `undefined`, so a **plain browser tab** (no
-  preload, e.g. the dev server at `http://localhost:5173`) **falls back to the `?scenario=` fixture**
-  and never white-screens. `applySnapshot` **drops any snapshot older than the last applied**
-  (`derivedAt` monotonic) — kills the invoke-reply-vs-tick-push backward-jump race. `.catch(onOpError)`
-  on every IPC promise.
-- **Filter wiring** (`src/renderer/src/flyout/filter.ts` + `Flyout.tsx`): new pure
-  `applyPausedFilter(rows, filter, currentUserId?)` narrows **only which PAUSED rows render**. ⚠️ The
-  pill's "M idle" keeps `snapshot.pausedCount` (the FULL total), never the filtered length. ACTIVE is
-  **never** filtered. A filtered-to-empty view shows "No paused tasks match the filter" (vs "No paused
-  tasks" when genuinely empty). Predicate narrows on optional `status`/`assigneeIds` fields that land
-  on the catalogue row in **Phase 5** (renderer-local `FilterableRow` type for now).
-- **New tests + verify harness:**
-  - `src/renderer/src/flyout/filter.test.ts` — **12 Vitest tests** for `applyPausedFilter` (strict
-    status/assignee narrowing, AND across groups, purity/non-mutation, view-only subset). Runs under
-    the existing node vitest config.
-  - `scripts/ipc-verify.mjs` + a `CADENCE_IPCTEST` branch in `src/main/index.ts` +
-    `npm run verify:ipc` — a **real end-to-end IPC drive**: boots the built app on an **isolated**
-    userData dir, drives `window.cadence` via `executeJavaScript`, asserts membership/ordering/
-    transitions/idempotency/union-no-double-count (**12/12 PASS**). Fails fast if the isolation dir is
-    missing (protects the real worklog).
-- **Review-panel fixes applied** (both lenses SOUND; 6 minor findings fixed): `derivedAt` stale-drop;
-  `hasTask` id guard (phantom-interval); `.catch` on IPC promises; manual-input sanitize; honest tick
-  gate; IPCTEST fail-fast + non-empty-results guard. Two findings **deferred with rationale** (see
-  Open threads).
+- **Pure, unit-tested window helpers** (electron-free, run under Vitest):
+  - `src/main/window/position.ts` — `computeFlyoutPosition(win, tray, work, display)` +
+    `inferTaskbarEdge` + `clamp`. Infers the taskbar edge from the work-area vs display-bounds gap,
+    anchors the flyout to the tray along that edge, and **clamps the whole rect into the work area for
+    all four edges** (not just bottom). Uses `screen.getPrimaryDisplay()` only (multi-monitor deferred).
+  - `src/main/window/format.ts` — `formatDuration` (`Xh YYm`/`Mm`, **tolerant of 3-digit hours**, no
+    truncation), `formatTrayTooltip(sessionWorkedMs, runningCount)` (uses the **union** `sessionWorkedMs`,
+    never a per-task sum), `shouldHideOnBlur({isDev, devToolsFocused})`.
+  - `src/main/window/position.test.ts` (10) + `format.test.ts` (10) — **20 new Vitest tests** (all 4
+    taskbar edges, clamping, oversized window, unknown-tray fallback, 100h/999h tooltips, blur guard).
+- **IPC contract** (`src/shared/ipc.ts`): added fire-and-forget window channels `minimizeWindow`/
+  `closeWindow`/`resizeWindow` + `CadenceApi.minimize()`/`close()`/`resizeTo(panelHeight)`.
+  Preload wrappers use `ipcRenderer.send` (`src/preload/index.ts`).
+- **Main** (`src/main/index.ts`) — the big one:
+  - **Tray**: icon from `resources/icon.png` (nativeImage→16px); tooltip = session total (union),
+    refreshed on the 1s tick + every op + auto-pause; menu **Show/Hide + Quit**; left-click =
+    `handleTrayClick` (with a **blur-race guard**, `TRAY_REOPEN_GUARD_MS=250`, so a click-to-close on
+    Windows doesn't immediately re-open). Tray-creation failure **degrades safely** (un-skip taskbar +
+    show — never a hidden, unquittable zombie).
+  - **Window**: width **408** (`PANEL_WIDTH 380 + 2×FLYOUT_GUTTER 14`; gutter must match `.stage`
+    padding in `flyout.css`). **Content-driven height**: renderer reports panel natural height →
+    `applyPanelHeight` sizes the window (clamped to work area, then PAUSED scrolls) and re-anchors.
+  - **Positioning**: `positionFlyout` (primary display work area + tray bounds → `computeFlyoutPosition`).
+  - **Lifecycle**: `showFlyout`/`hideFlyout`/`toggleFlyout`; minimize/close IPC → `hideFlyout`
+    (session alive); **Quit only via tray** → `app.quit`. **We deliberately do NOT veto the window
+    `close` event** (vetoing would block/delay Windows shutdown/logout, since `before-quit` isn't
+    emitted on Windows session-end) — Alt+F4/OS-close ends the session **gracefully** via
+    window-all-closed → `app.quit` → `before-quit` → `engine.quit()`.
+  - **Auto-pause**: `powerMonitor` `suspend`/`lock-screen` → `engine.stopAllRunning`; `before-quit` →
+    `engine.quit()`. **Closes the two Stage-3b-deferred items** (graceful-quit accuracy + the
+    `onMinimize`/`onClose` stubs).
+  - **Hide-on-blur**: `handleBlur` gated by `shouldHideOnBlur({isDev: isDevMode, …})`. `isDevMode =
+    is.dev && !HARNESS` — because `is.dev = !app.isPackaged` is TRUE when a harness runs the unpackaged
+    build via `electron .`, so harnesses must be forced production-like.
+  - **Single-instance**: lock acquired (skipped under harness); `second-instance` handler registered
+    **unconditionally** → `showFlyout()` (or `pendingShow` if the window isn't built yet — startup race).
+  - **Autostart**: `applyAutostart` → `setLoginItemSettings`; enabled in-app only `if (app.isPackaged)`.
+- **Renderer** (`src/renderer/src/App.tsx`): wired `onMinimize→bridge.minimize()`,
+  `onClose→bridge.close()`, passed to `Flyout`. Added a **content-driven autosize** effect (keyed on
+  `ready = snapshot!==null`): a `ResizeObserver` on `.flyout`+`.content` + `fonts.ready` measures the
+  panel's natural height (`chrome + content.scrollHeight`, clamp-invariant) and reports it via
+  `resizeTo`, with a `≤1px` dedup. Browser fallback (no bridge) stays inert. **No business logic /
+  re-summing** — measures DOM only (renderer stays a pure projection).
+- **Stage-4 verify harness**: `CADENCE_TRAYTEST` branch in main + `scripts/tray-verify.mjs` +
+  `npm run verify:tray`. Boots the built app on an **isolated** userData dir and drives the **REAL
+  seams** — `tray.emit('click')`, `ipcMain.emit(closeWindow)`, `powerMonitor.emit('suspend')`,
+  `win.emit('blur')`, `app.emit('second-instance')` — asserting hidden start, tray toggle within the
+  work area, width=408, close→tray keeps the session, suspend auto-pause, blur-hide, second-instance
+  show+reposition, autostart written (snapshot+restore so it never clobbers the real login item), and
+  height-clamp. **13/13 PASS.**
+- **Review-panel fixes applied** (3 adversarial lenses: positioning/lifecycle edge-cases ·
+  integration-reality · spec-conformance): removed the shutdown-blocking close-veto; rewrote the tray
+  harness to drive real event seams (was bypassing them via private helpers — a gate-honesty gap);
+  tray-failure degradation; autostart snapshot/restore; gated `registerWindowIpc` behind `!SMOKE &&
+  !IPCTEST` (autosize was reshaping the SMOKE screenshot); `pendingShow` for the second-instance
+  startup race. Two findings **deferred with rationale** (see Open threads).
 
 ## Current state
-- **Stage 3b complete, reviewed, all gates green, committed + pushed.** Working tree clean after commit.
-- **All gates:** `npm run typecheck` clean · `npm run lint` clean · `npm test` **69 passed**
-  (57 engine + 12 filter) · `npm run build` clean · `npm run smoke` 5/5 (now a live end-to-end empty
-  render) · `npm run verify:ipc` **12/12**.
-- The engine is fully wired into main/preload/renderer. The live app renders the real session state;
-  the browser-only route still renders fixtures for capture.
-- Phase 0 GREEN. Next human gate is **Stage 6** (T2, clean-install + reboot). Stage 4 ends on the
-  **automated** review-panel gate (no human review). *(Stage 4's `missing_checks` include a
-  positioning edge and single-instance show+reposition — see spine.)*
+- **Stage 4 complete, reviewed, all gates green, committed + pushed.** Working tree clean after commit.
+- **All gates:** `npm run typecheck` clean · `npm run lint` clean · `npm test` **89 passed**
+  (57 engine + 12 filter + 20 window) · `npm run build` clean · `npm run smoke` 5/5 ·
+  `npm run verify:ipc` **12/12** · `npm run verify:tray` **13/13**.
+- The app is now a real tray flyout: hidden by default, tray-driven reveal, content-fit, auto-pausing.
+- Phase 0 GREEN. Next human gate is **Stage 6** (T2, clean-install + reboot — which also carries
+  Stage-4's autostart-after-reboot proof). Stage 5 ends on the **automated** review-panel gate.
 
-## Next actions (priority order) — Stage 4: Tray & window behavior (Phase 4)
-Read `IMPLEMENTATION_PLAN.md` **Phase 4** + `VERIFICATION_SPINE.md` **Stage 4** first.
-1. **Tray icon + tooltip = the session total** (`sessionWorkedMs`, "worked this session"), updated each
-   second; tray menu: Show/Hide, **Quit**. Tooltip must tolerate **3-digit hours** (no truncation).
-2. **Click tray → toggle the flyout**, positioned bottom-right above the taskbar near the tray
-   (`screen.getPrimaryDisplay().workArea` + tray `getBounds()`; **clamp to the work area for
-   top/left/right taskbars**, not just bottom).
-3. **Window sizing (the deferred Phase-4 item):** the transparent window is still the Stage-1
-   placeholder (**380 wide × 600 tall**, `src/main/index.ts` `FLYOUT_WIDTH`/`FLYOUT_HEIGHT`). Size it to
-   **panel(380) + shadow gutter**, height **content-driven** with internal PAUSED scroll — the panel's
-   shadow gutter currently clips. (The `.flyout` is pinned at exactly 380px via `flex: none`; 3a's
-   captures show the intended result.)
-4. **Wire the window controls + lifecycle** (App.tsx already threads `onMinimize`/`onClose` as
-   unwired stubs): minimize → hide to tray; close (`×`) → **hide to tray (session stays alive)**;
-   **Quit only via tray** → ends the session. On Quit/suspend/lock, call the engine's **auto-pause**
-   (`engine.quit()` / `engine.stopAllRunning('suspend'|'lock'|'quit')` — these already exist) so
-   running timers stop. **This closes the two Stage-3b-deferred items (see Open threads).**
-5. **Hide-on-blur** — except **disabled in dev / when DevTools is focused** (else dev is unusable).
-6. **Autostart on login** via `app.setLoginItemSettings` (default on; persisted). Programmatic write
-   only — the **real reboot proof is deferred to the Stage 6 human gate**.
-7. **Single-instance lock** — the flyout is hidden by default, so a 2nd launch must **show +
-   reposition** the existing window, not merely `focus()` an invisible one.
-8. **Stage 4 verification** = `/verify` (tray click shows in work area, blur hides with the dev
-   exception, 2nd instance shows+repositions) + review panel (edge-cases: positioning/single-instance;
-   integration-reality). Ends on the **automated** gate → summary + "start a new session";
-   auto-`/future-claude` first.
+## Next actions (priority order) — Stage 5: ClickUp READ integration (Phase 5)
+Read `IMPLEMENTATION_PLAN.md` **Phase 5** + `VERIFICATION_SPINE.md` **Stage 5** first. The spine
+**recommends splitting 5a/5b** (one bounded session each): **5a** = auth + per-list traversal + mapping
+→ real catalogue verified; **5b** = refresh/resilience/rate-limit/filters/connect-state.
+1. **Re-confirm ClickUp v2 request/response shapes against CURRENT docs** (endpoints, params,
+   pagination, `custom_id`, rate-limit headers) — third-party APIs drift; don't trust training memory.
+2. **Auth & client** (`src/main/clickup.ts`): token from `.env.local` (dev); header
+   `Authorization: <pk_token>` (**no `Bearer`**); base `https://api.clickup.com/api/v2`. `GET /user`
+   also yields the **current user id** (needed for "Assigned to me").
+3. **Per-list traversal**: `GET /user` → `GET /team` → per space `GET /space/{id}/folder` +
+   `/space/{id}/list` → per list `GET /list/{id}/task?subtasks=true` (exclude closed/archived; paginate
+   `page` to `last_page`, 100/page). **Dedupe by task id, first-breadcrumb-wins.**
+4. **Map → `Task`**: `code = task.custom_id ?? null` (chip hidden when null — Free plan → null);
+   `color` = **deterministic local palette hashed by list-id** (lists have no API color); carry
+   **status + assigneeIds** through to the renderer for the filters. Call `engine.setCatalogue(tasks)`.
+5. **Activate the filter**: attach `status`/`assigneeIds` to each catalogue row + thread the current-user
+   id into `applyPausedFilter(rows, filter, currentUserId)` (already built + unit-tested in Stage 3b).
+6. **Resilience**: show cached catalogue on launch then refresh; **refresh = metadata-only, never
+   reorders/interrupts a running card**; throttle to the 100 req/min floor; on `429` honor
+   `X-RateLimit-Reset`; no-token → "Connect ClickUp" prompt (not blank). Add an in-app token field
+   (encrypted via **`safeStorage`** — the build's secret-at-rest boundary) from the tray menu.
+7. **Secret hygiene (public repo, load-bearing)**: real `pk_` only in untracked `.env.local`; raw token
+   never on disk/logs; run a secret sweep (working tree + git history) — this is a Stage-6 gate too.
+8. **Stage 5 verification** = docs-check + `/verify` (scripted real fetch with the `.env.local` token →
+   catalogue/breadcrumbs/dedupe/filters/429-backoff/blank-token-prompt) + review panel
+   (integration/resilience + security). Ends on the **automated** gate → summary + "start a new
+   session"; auto-`/future-claude` first.
 
 ## Open threads / do-not-relitigate (settled)
-- **`pausedCount` must not shrink under the filter** — locked in and verified this stage (pill uses
-  `snapshot.pausedCount`, never the filtered length). Documented in `src/shared/types.ts`.
-- **DEFERRED to Stage 4 (both flagged by the 3b review panel, intentionally):**
-  1. **`will-quit` does NOT stop running timers.** The engine has `quit()`/`stopAllRunning()`; 3b left
-     them unwired (Phase 4 owns Quit/suspend/lock semantics). Next-launch **crash-close** already
-     prevents phantom time, so this is not data loss — BUT note: until **Phase 6 heartbeats** land,
-     crash-close closes a dangling interval at `max(ts)` = the last `start` ts, so a *graceful* quit
-     currently records the final start→quit span as ~0 duration. Wire `engine.quit()` in Phase 4 to
-     make graceful-quit history accurate. (CLAUDE.md lists "auto-pause on Quit" as v0 scope.)
-  2. **`onMinimize`/`onClose` are unwired stubs** in `App.tsx` (Phase 4 wires them to hide-to-tray).
-- **Filter empties the live PAUSED list on real 3b data (intentional, not a bug).** Live `TaskRow`s
-  carry no `status`/`assigneeIds` yet (Phase 5), so the **strict** predicate drops every paused row
-  when any status/assignee is toggled → "No paused tasks match the filter." The pill still shows the
-  true `pausedCount`, and the predicate is unit-tested correct with synthetic status/assignee rows.
-  **Phase 5** attaches the real fields (+ the current-user id via `GET /user`) and threads
-  `currentUserId` into `applyPausedFilter`; then the filter goes live. **Do not** hide/disable the
-  Filter button (would change signed-off UI + couple to Phase 5). If Luca finds the interim
-  empties-on-toggle jarring, the smallest change is to disable the toggle chips until rows carry
-  metadata — but the agreed default is to leave it.
-- **Do NOT re-litigate the `3a` look** — Luca signed it off (T3) at Stage 3a. The empty-state text and
-  the new "…match the filter" message are consistent with the approved muted empty-state pattern.
-- Settled earlier and still holding: local event log as source of truth + **no ClickUp push in v0**
-  (grep-verified none this stage); per-task elapsed = union; `sessionWorkedMs` in ms; `id` as final
-  PAUSED-sort tiebreaker; self-hosted fonts; `sandbox:true`; `*.md` in `.prettierignore`.
-- **Carry-forwards (not bugs):** `glyph` carried but intentionally not rendered (3a uses colored bars +
-  gradient cards). `initialPanel` is launch-time-only (not reactive) — fine. The renderer receives a
-  full snapshot each push and re-renders — it never re-sums/re-sorts (verified SOUND).
+- **Stage-4 deferred, intentionally (flagged by the review panel, accepted):**
+  1. **Multi-monitor positioning** — `positionFlyout` uses `screen.getPrimaryDisplay()`. If the whole
+     taskbar/tray lives on a *secondary* monitor, the flyout opens on the primary. This is **explicitly
+     deferred** in `IMPLEMENTATION_PLAN.md` ("multi-monitor positioning beyond clamping to the primary
+     work area") — do NOT expand scope; leave as primary-display.
+  2. **250ms tray-reopen guard** (`TRAY_REOPEN_GUARD_MS`) is timing-based: a blur-hide immediately
+     followed (<250ms) by a tray click to re-open is suppressed and needs a second click. Deliberate
+     tradeoff for correct click-to-close; acceptable for a flyout. Not a bug.
+- **Behavior change to a signed-off harness path (accepted):** under `CADENCE_IPCTEST` the window now
+  launches **hidden** (previously `is.dev` showed it). Harmless — `verify:ipc` drives via
+  `executeJavaScript` regardless of visibility; still **12/12**. This is more faithful to shipped
+  behavior. Don't misread it as a regression.
+- **Alt+F4 / OS-close ends the session (accepted).** The `close` event is intentionally **not vetoed**
+  (see main index.ts comment) so Windows shutdown/logout is never blocked. The spec's "close (×) → hide
+  to tray" is satisfied by the **× control's IPC path** (`closeWindow → hideFlyout`), which is what the
+  harness now tests. "Quit only via tray" holds for the UI; Alt+F4 is an OS force-close that quits
+  gracefully.
+- Still holding from earlier stages: local event log = source of truth + **no ClickUp push in v0**
+  (grep-verified none this stage); per-task elapsed = union; tray tooltip = union (never a per-task
+  sum); `pausedCount` never shrinks under the filter; `sessionWorkedMs` in ms; self-hosted fonts;
+  `sandbox:true`; `*.md` in `.prettierignore`; do NOT re-litigate the `3a` look (Luca signed it off, T3).
+- **Carry-forwards (not bugs):** `glyph` carried but not rendered; `initialPanel` launch-time-only; the
+  renderer receives a full snapshot each push and never re-sums/re-sorts.
 
 ## Pointers
 - **Build root must be local** (laptop C:), not `G:\Other computers\…`. Commands: `npm run dev`
-  (electron-vite dev; renderer also at `http://localhost:5173/` in a browser → **fixture fallback**,
-  no live engine) · `npm test` (69 tests) · `npm run typecheck` · `npm run lint` · `npm run build` ·
-  `npm run smoke` (Stage-1 shell + live empty render) · **`npm run verify:ipc`** (Stage-3b end-to-end
-  IPC drive).
-- **IPC contract** is `src/shared/ipc.ts` (channels + `CadenceApi`). **Data model** is
-  `src/shared/types.ts` (`StateSnapshot` now carries `derivedAt`; `ManualTaskInput` lives here).
-- **The engine** (`src/main/engine/`) is pure + injected (`EngineDeps = { dir, now }`); `getState()`
-  returns the serializable `StateSnapshot`. Ops: `start`/`stop`/`toggle`/`addManualTask`/
-  `removeFromList`/`setCatalogue` (Phase 5)/`quit`/`stopAllRunning`/`heartbeat` (Phase 6). New:
-  `hasRunning()`, `hasTask(id)`.
-- **The 3a UI** lives in `src/renderer/src/flyout/`. `Flyout` is a **pure render** of a
-  `StateSnapshot` + optional op handlers. `App.tsx` owns the live subscription + the `bridge()`
-  fallback + `applySnapshot` (monotonic `derivedAt` drop). Filter view-state (`FilterState`) is
-  renderer-only; `applyPausedFilter` is pure and unit-tested.
-- **Verify harnesses**: `scripts/smoke.mjs` (CADENCE_SMOKE branch in main) and `scripts/ipc-verify.mjs`
-  (CADENCE_IPCTEST branch in main — isolated userData, `executeJavaScript` drive). Both mirror the
-  same spawn→result-JSON→exit-code pattern.
-- Plan: `IMPLEMENTATION_PLAN.md` (Phase 4 next) · Spine: `VERIFICATION_SPINE.md` (**Stage 4**, soft
-  automated gate) · Charter: `CLAUDE.md`. Doctrine: no human review of routine diffs; mandatory
-  autonomous review panel after every non-trivial phase; human gates only at T1/T2/T3; one phase = one
-  bounded session; auto-`/future-claude` before every handoff.
+  (electron-vite dev; renderer also at `http://localhost:5173/` in a browser → **fixture fallback**, no
+  live engine) · `npm test` (89) · `npm run typecheck` · `npm run lint` · `npm run build` ·
+  `npm run smoke` · `npm run verify:ipc` · **`npm run verify:tray`** (Stage-4 real-seam drive).
+- **Stage-4 code**: `src/main/index.ts` (tray/positioning/sizing/lifecycle/auto-pause/blur/autostart/
+  single-instance + the `CADENCE_TRAYTEST` harness branch) · `src/main/window/position.ts` +
+  `format.ts` (pure, unit-tested) · `src/renderer/src/App.tsx` (window controls + autosize) ·
+  `scripts/tray-verify.mjs`.
+- **IPC contract** `src/shared/ipc.ts` (channels + `CadenceApi`; now includes the window surface).
+  **Data model** `src/shared/types.ts` (`StateSnapshot` carries `derivedAt`; `sessionWorkedMs` = union).
+- **The engine** (`src/main/engine/`) is pure + injected (`EngineDeps = { dir, now }`). Ops:
+  `start`/`stop`/`toggle`/`addManualTask`/`removeFromList`/`setCatalogue` (**Phase 5 entry point**)/
+  `quit`/`stopAllRunning`/`heartbeat` (Phase 6) + `hasRunning()`/`hasTask(id)`.
+- **The 3a UI** lives in `src/renderer/src/flyout/`. `Flyout` is a pure render of a `StateSnapshot`;
+  `applyPausedFilter` (pure, unit-tested) is ready — Phase 5 supplies `status`/`assigneeIds`/currentUserId.
+- **Verify harnesses**: all mirror the same spawn→result-JSON→exit-code pattern with a `CADENCE_*` env
+  branch in `src/main/index.ts` and an isolated userData dir: `scripts/smoke.mjs` (CADENCE_SMOKE),
+  `scripts/ipc-verify.mjs` (CADENCE_IPCTEST), `scripts/tray-verify.mjs` (CADENCE_TRAYTEST).
+- Plan: `IMPLEMENTATION_PLAN.md` (**Phase 5** next) · Spine: `VERIFICATION_SPINE.md` (**Stage 5**, soft
+  automated gate, recommend split 5a/5b) · Charter: `CLAUDE.md`. Doctrine: no human review of routine
+  diffs; mandatory autonomous review panel after every non-trivial phase; human gates only at T1/T2/T3
+  (next is Stage 6 — T2); one phase = one bounded session; auto-`/future-claude` before every handoff.
 - GitHub: `https://github.com/LucaChech/time_tracker` (PUBLIC, `main`, `origin`). gh authed as
-  `LucaChech`. Secret hygiene load-bearing (public repo): real `pk_` token only in untracked
-  `.env.local`.
-- ClickUp (Phase 5, later): base `https://api.clickup.com/api/v2`; header `Authorization: <pk_token>`
+  `LucaChech`. Secret hygiene load-bearing: real `pk_` token only in untracked `.env.local`.
+- ClickUp (Stage 5): base `https://api.clickup.com/api/v2`; header `Authorization: <pk_token>`
   (**no `Bearer`**); workspace id `90121836206`; Free plan → `custom_id` null, lists have no API color.
-  Phase 5 also attaches `status` + `assigneeIds` to each `Task` and the current-user id → activates
-  the filter.

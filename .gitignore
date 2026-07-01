@@ -19,6 +19,8 @@ out/
 release/
 *.local
 .eslintcache
+# TypeScript incremental build artifacts (tsc composite/--build).
+*.tsbuildinfo
 
 # --- Electron / runtime artifacts ---
 *.log

@@ -26,7 +26,8 @@
     "build:mac": "electron-vite build && electron-builder --mac",
     "build:linux": "electron-vite build && electron-builder --linux",
     "smoke": "node scripts/smoke.mjs",
-    "verify:ipc": "node scripts/ipc-verify.mjs"
+    "verify:ipc": "node scripts/ipc-verify.mjs",
+    "verify:tray": "node scripts/tray-verify.mjs"
   },
   "dependencies": {
     "@electron-toolkit/utils": "^4.0.0",
