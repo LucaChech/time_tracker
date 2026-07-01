@@ -90,7 +90,11 @@ export interface StateSnapshot {
   paused: TaskRow[]
   /** Number of live timers (= `active.length`). The pill's "N live". */
   runningCount: number
-  /** Number of idle tasks shown (= `paused.length`). The pill's "M idle". */
+  /** The pill's "M idle" — count of ALL paused tasks (catalogue minus running and
+   *  session-removed). Equals `paused.length` today, but once 3b applies the
+   *  view-only filter, the filter narrows which rows RENDER while this count must
+   *  stay the full paused total (plan: "intentionally can be large, e.g. 247 idle").
+   *  So the renderer must show this field, never a filtered `paused.length`. */
   pausedCount: number
   /** Wall-clock UNION of all run-intervals this session ("how long I worked").
    *  Parallel overlaps do not double-count: 3×1h parallel ⇒ 1h. Tray tooltip

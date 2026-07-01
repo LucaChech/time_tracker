@@ -13,6 +13,7 @@ import 'material-symbols/outlined.css'
 
 import './assets/tokens.css'
 import './assets/main.css'
+import './flyout/flyout.css'
 
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'

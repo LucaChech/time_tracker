@@ -1,34 +1,30 @@
-import { useEffect, useState, type JSX } from 'react'
-import type { AppInfo, SmokeReport } from '@shared/ipc'
+import { useEffect, type JSX } from 'react'
+import type { SmokeReport } from '@shared/ipc'
+import { Flyout } from './flyout/Flyout'
+import { getScenario } from './flyout/fixtures'
 
 const REQUIRED_FONTS = ['Space Grotesk', 'Work Sans', 'Material Symbols Outlined']
 // If contextIsolation/nodeIntegration/sandbox hold, every one of these is undefined
 // in the renderer. The Stage-1 smoke harness asserts exactly that.
 const NODE_GLOBALS = ['require', 'process', 'module', 'global', 'Buffer', '__dirname']
 
-function Icon({ name, className }: { name: string; className?: string }): JSX.Element {
-  return (
-    <span className={`material-symbols-outlined${className ? ` ${className}` : ''}`}>{name}</span>
-  )
+// Stage 3a is the static, pixel-faithful 3a panel BEFORE it is wired to the state
+// engine (that is Stage 3b). It renders a fixture StateSnapshot; `?scenario=` picks
+// which (populated | empty | long) and `?panel=` pre-opens an inset panel, so the
+// verification harness can capture every state deterministically.
+function readParams(): { scenario: string | null; panel: 'composer' | 'filter' | undefined } {
+  const q = new URLSearchParams(window.location.search)
+  const panel = q.get('panel')
+  return {
+    scenario: q.get('scenario'),
+    panel: panel === 'composer' || panel === 'filter' ? panel : undefined
+  }
 }
 
 function App(): JSX.Element {
-  const [info, setInfo] = useState<AppInfo | null>(null)
-
-  // Pull app + runtime info across the typed bridge (also proves IPC invoke works).
-  useEffect(() => {
-    let alive = true
-    window.cadence
-      .getAppInfo()
-      .then((i) => alive && setInfo(i))
-      .catch(() => undefined)
-    return () => {
-      alive = false
-    }
-  }, [])
-
-  // Stage-1 smoke self-check. A harmless no-op in normal runs (main only listens
-  // when CADENCE_SMOKE=1); under the harness it reports the security + font proof.
+  // Stage-1 smoke self-check, carried forward unchanged. A harmless no-op in normal
+  // runs (main only listens when CADENCE_SMOKE=1); under the harness it still proves
+  // the security posture + self-hosted fonts that the 3a UI now depends on.
   useEffect(() => {
     let alive = true
     async function runSmoke(): Promise<void> {
@@ -38,10 +34,8 @@ function App(): JSX.Element {
         const w = globalThis as unknown as Record<string, unknown>
         const nodeReach: Record<string, string> = {}
         for (const g of NODE_GLOBALS) nodeReach[g] = typeof w[g]
-        // Faces load lazily — a weight the shell never renders (e.g. Space Grotesk 400)
-        // is otherwise never fetched, so check() would report false for a font that IS
-        // bundled. load() forces the fetch from the local bundle and resolves once it's
-        // available, which is exactly what "self-hosted, offline" should prove.
+        // load() forces the fetch from the local bundle so check() reports true even
+        // for a weight the UI never renders — proving the fonts are self-hosted.
         await Promise.all(REQUIRED_FONTS.map((f) => document.fonts.load(`16px "${f}"`)))
         if (!alive) return
         const fonts: Record<string, boolean> = {}
@@ -59,53 +53,8 @@ function App(): JSX.Element {
     }
   }, [])
 
-  return (
-    <div className="app-shell">
-      <div className="titlebar">
-        <div className="brand">
-          <span className="brand-mark">
-            <Icon name="timer" />
-          </span>
-          <span className="brand-name">Cadence</span>
-        </div>
-        {/* Window controls are visual only in Stage 1 — wired to the tray/window
-            behavior in Phase 4 (minimize → hide, close → hide to tray). */}
-        <div className="window-controls">
-          <button type="button" aria-label="Minimize">
-            <Icon name="remove" />
-          </button>
-          <button type="button" className="close" aria-label="Close">
-            <Icon name="close" />
-          </button>
-        </div>
-      </div>
-
-      <div className="shell-body">
-        <div className="shell-eyebrow">Shell ready</div>
-        <h1 className="shell-headline">Cadence</h1>
-        <p className="shell-sub">
-          Parallel time tracker — Stage&nbsp;1 scaffold &amp; app shell. The 3a flyout UI lands in
-          Phase&nbsp;3.
-        </p>
-
-        <dl className="shell-meta">
-          <dt>Version</dt>
-          <dd>{info?.version ?? '—'}</dd>
-          <dt>Electron</dt>
-          <dd>{info?.electron ?? '—'}</dd>
-          <dt>Chromium</dt>
-          <dd>{info?.chrome ?? '—'}</dd>
-          <dt>Node</dt>
-          <dd>{info?.node ?? '—'}</dd>
-        </dl>
-
-        <span className="shell-ok">
-          <Icon name="shield" />
-          Isolated renderer · typed IPC
-        </span>
-      </div>
-    </div>
-  )
+  const { scenario, panel } = readParams()
+  return <Flyout snapshot={getScenario(scenario)} initialPanel={panel ?? 'none'} />
 }
 
 export default App

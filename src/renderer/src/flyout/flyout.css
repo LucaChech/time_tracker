@@ -1,0 +1,624 @@
+/* ============================================================
+   Cadence — 3a flyout styles (Stage 3a, static/pixel-faithful).
+
+   Every value here is transcribed from the `3a` prototype
+   (TimeTracker-handoff/.../Cadence Tracker.dc.html, section #3a) and
+   colors_and_type.css. Where the prototype uses inline styles, the same
+   numbers live here as classes; per-task color-derived values (gradient,
+   ring, attention bar) stay inline in the components because they depend
+   on the task color.
+
+   v0 deviations from the prototype, all settled in IMPLEMENTATION_PLAN.md
+   Phase 3 (present by design — NOT fidelity regressions):
+     • maximize window control removed (min + close only)
+     • per-row remove (×) on PAUSED rows
+     • filter control (Assigned-to-me + Task-status, view-only)
+     • ClickUp code chip hidden when null; manual code always null
+   Hard rule: NO GREEN anywhere — success is communicated in blue.
+   ============================================================ */
+
+/* Filled Material Symbols (breadcrumb folder, pause, play, timer mark).
+   Loaded after the material-symbols base so this wins the cascade. */
+.ms-fill {
+  font-variation-settings:
+    'FILL' 1,
+    'opsz' 24;
+}
+
+/* Status/ping animations (prototype keyframes, verbatim). */
+@keyframes klpulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+@keyframes klping {
+  0% {
+    transform: scale(0.9);
+    opacity: 0.55;
+  }
+  70%,
+  100% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
+}
+
+/* ---- Stage: transparent gutter so the panel's ambient shadow reads.
+   The production window is transparent; Phase 4 sizes it to panel+gutter. */
+.stage {
+  display: flex;
+  justify-content: center;
+  padding: 14px;
+  background: transparent;
+}
+
+/* ---- The flyout panel ---- */
+.flyout {
+  width: 380px;
+  flex: none; /* hold exactly 380px — never let the stage shrink the panel */
+  max-height: calc(100vh - 28px);
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border-radius: 14px;
+  box-shadow:
+    0 22px 54px -14px rgba(20, 20, 45, 0.34),
+    0 2px 8px rgba(20, 20, 45, 0.08);
+  overflow: hidden;
+}
+
+/* ---- Title bar (min + close only — maximize removed) ---- */
+.titlebar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 8px 8px 14px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+  -webkit-app-region: drag; /* frameless window is draggable by its title bar */
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.brand-mark {
+  width: 19px;
+  height: 19px;
+  border-radius: 5px;
+  background: #0058bc;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+}
+.brand-mark .material-symbols-outlined {
+  font-size: 13px;
+}
+
+.brand-name {
+  font:
+    600 12.5px 'Space Grotesk',
+    sans-serif;
+  color: #1a1a1f;
+  letter-spacing: -0.01em;
+}
+
+.window-controls {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  color: rgba(0, 0, 0, 0.45);
+  -webkit-app-region: no-drag; /* buttons stay clickable */
+}
+
+.winbtn,
+.winclose {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  color: inherit;
+  padding: 5px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.winbtn .material-symbols-outlined,
+.winclose .material-symbols-outlined {
+  font-size: 17px;
+}
+.winbtn:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+.winclose:hover {
+  background: #c0504c;
+}
+.winclose:hover .material-symbols-outlined {
+  color: #fff;
+}
+
+/* ---- Scrollable content region ---- */
+.content {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 15px 15px 12px;
+}
+.content::-webkit-scrollbar {
+  width: 8px;
+}
+.content::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.14);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.content::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.24);
+  background-clip: padding-box;
+}
+
+/* ---- Current-session line ---- */
+.session-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 15px;
+  padding: 0 3px;
+}
+.session-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  min-width: 0;
+}
+.session-title,
+.session-total {
+  font:
+    700 15px 'Space Grotesk',
+    sans-serif;
+  color: #16161a;
+  letter-spacing: -0.01em;
+}
+.session-total {
+  font-variant-numeric: tabular-nums;
+}
+
+.live-pill {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(0, 88, 188, 0.09);
+  font:
+    600 10.5px 'Work Sans',
+    sans-serif;
+  color: #0058bc;
+}
+.live-dot {
+  position: relative;
+  width: 6px;
+  height: 6px;
+  display: inline-block;
+}
+.live-dot::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: #0058bc;
+  animation: klpulse 1.4s infinite;
+}
+
+/* ---- Section labels (ACTIVE / PAUSED) ---- */
+.section-label {
+  font:
+    600 9.5px 'Work Sans',
+    sans-serif;
+  letter-spacing: 0.14em;
+  color: rgba(0, 0, 0, 0.32);
+  margin: 0 3px 7px;
+}
+.section-label--gap {
+  margin-top: 15px;
+}
+.section-empty {
+  font:
+    500 11.5px 'Work Sans',
+    sans-serif;
+  color: rgba(0, 0, 0, 0.3);
+  margin: 0 3px 4px;
+  padding: 1px 0 3px;
+}
+
+/* ---- Active task card ---- */
+.card {
+  position: relative;
+  overflow: hidden;
+  border-radius: 16px;
+  padding: 14px 16px 15px;
+  margin-bottom: 10px;
+}
+.card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+.card-crumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 9px;
+  min-width: 0;
+}
+.crumb-space {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font:
+    600 9px 'Work Sans',
+    sans-serif;
+  letter-spacing: 0.09em;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.2);
+  padding: 4px 9px;
+  border-radius: 999px;
+  flex: none;
+}
+.crumb-space .material-symbols-outlined {
+  font-size: 12px;
+}
+.crumb-chevron {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.6);
+  flex: none;
+}
+.crumb-list {
+  font:
+    600 10px 'Work Sans',
+    sans-serif;
+  letter-spacing: 0.02em;
+  color: rgba(255, 255, 255, 0.92);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card-title {
+  font:
+    600 15.5px 'Work Sans',
+    sans-serif;
+  color: #fff;
+  max-width: 240px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ping {
+  position: relative;
+  width: 8px;
+  height: 8px;
+  display: inline-block;
+  margin-top: 4px;
+  flex: none;
+}
+.ping-core {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.95);
+}
+.ping-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: #fff;
+  animation: klping 1.6s ease-out infinite;
+}
+.card-bottom {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  margin-top: 14px;
+}
+.card-timer-wrap {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  min-width: 0;
+}
+.card-timer {
+  font:
+    700 26px/1 'Space Grotesk',
+    sans-serif;
+  color: #fff;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.card-code {
+  font:
+    500 10px 'Work Sans',
+    sans-serif;
+  color: rgba(255, 255, 255, 0.7);
+  letter-spacing: 0.04em;
+  flex: none;
+}
+.pause-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  border: none;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.94);
+  color: #1a1a1f;
+  font:
+    600 12px 'Work Sans',
+    sans-serif;
+  padding: 8px 14px;
+  border-radius: 999px;
+}
+.pause-btn .material-symbols-outlined {
+  font-size: 16px;
+}
+.pause-btn:active {
+  transform: scale(0.97);
+}
+
+/* ---- Paused task row ---- */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 8px 6px;
+}
+.row-bar {
+  width: 3px;
+  height: 34px;
+  border-radius: 2px;
+  flex: none;
+}
+.row-main {
+  flex: 1;
+  min-width: 0;
+}
+.row-name {
+  font:
+    600 13px 'Work Sans',
+    sans-serif;
+  color: #26262b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.row-crumb {
+  font:
+    500 10.5px 'Work Sans',
+    sans-serif;
+  color: rgba(0, 0, 0, 0.42);
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.row-short {
+  font:
+    600 12.5px 'Space Grotesk',
+    sans-serif;
+  color: rgba(0, 0, 0, 0.42);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+.play-btn {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: #fff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.play-btn .material-symbols-outlined {
+  font-size: 20px;
+}
+.play-btn:active {
+  transform: scale(0.94);
+}
+/* v0 deviation: per-row remove (hides the row for the session). */
+.remove-btn {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  margin-left: -3px;
+  border: none;
+  background: none;
+  border-radius: 50%;
+  color: rgba(0, 0, 0, 0.28);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.remove-btn .material-symbols-outlined {
+  font-size: 16px;
+}
+.remove-btn:hover {
+  background: rgba(192, 80, 76, 0.12);
+  color: #c0504c;
+}
+
+/* ---- Text inputs (composer + shared) ---- */
+.ci {
+  flex: 1;
+  border: none;
+  background: #fff;
+  border-radius: 8px;
+  padding: 9px 11px;
+  font:
+    500 12px 'Work Sans',
+    sans-serif;
+  color: #1a1a1f;
+  outline: none;
+  min-width: 0;
+}
+.ci::placeholder {
+  color: rgba(0, 0, 0, 0.34);
+}
+
+/* ---- Manual-task composer + filter panel (shared inset surface) ---- */
+.inset-panel {
+  margin-top: 10px;
+  padding: 13px;
+  background: #f4f3ef;
+  border-radius: 13px;
+}
+.inset-eyebrow {
+  font:
+    600 9.5px 'Work Sans',
+    sans-serif;
+  letter-spacing: 0.12em;
+  color: rgba(0, 0, 0, 0.42);
+  margin-bottom: 9px;
+  text-transform: uppercase;
+}
+.composer-name {
+  width: 100%;
+  margin-bottom: 7px;
+  font-size: 12.5px;
+}
+.composer-fields {
+  display: flex;
+  gap: 7px;
+  margin-bottom: 7px;
+}
+.composer-actions {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  justify-content: flex-end;
+}
+.btn-cancel {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: rgba(0, 0, 0, 0.45);
+  font:
+    600 12px 'Work Sans',
+    sans-serif;
+  padding: 0 4px;
+}
+.btn-add {
+  border: none;
+  cursor: pointer;
+  background: #0058bc;
+  color: #fff;
+  font:
+    600 12px 'Work Sans',
+    sans-serif;
+  padding: 9px 15px;
+  border-radius: 8px;
+}
+
+/* ---- Filter chips ---- */
+.filter-group {
+  margin-bottom: 9px;
+}
+.filter-group:last-child {
+  margin-bottom: 0;
+}
+.filter-group-label {
+  font:
+    600 9px 'Work Sans',
+    sans-serif;
+  letter-spacing: 0.08em;
+  color: rgba(0, 0, 0, 0.4);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+}
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border: none;
+  cursor: pointer;
+  border-radius: 999px;
+  padding: 6px 11px;
+  font:
+    600 11px 'Work Sans',
+    sans-serif;
+  background: #fff;
+  color: rgba(0, 0, 0, 0.55);
+}
+.chip .material-symbols-outlined {
+  font-size: 14px;
+}
+.chip--on {
+  background: rgba(0, 88, 188, 0.12);
+  color: #0058bc;
+}
+
+/* ---- Footer ---- */
+.footer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  /* 11px top / 14px bottom reproduces the prototype's padding-top:11px above the
+     footer border and the content wrapper's 14px bottom inner padding. */
+  padding: 11px 15px 14px;
+  border-top: 1px solid rgba(0, 0, 0, 0.05);
+}
+.footer-left {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.footer-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font:
+    600 11px 'Work Sans',
+    sans-serif;
+  color: rgba(0, 0, 0, 0.45);
+  padding: 0;
+}
+.footer-btn .material-symbols-outlined {
+  font-size: 15px;
+}
+.footer-btn--accent {
+  color: #0058bc;
+}
+.footer-btn--on {
+  color: #0058bc;
+}
+
+/* ---- Deterministic capture: freeze the looping animations so the
+   screenshot-diff isn't flaky. Also a reasonable accessibility default. ---- */
+@media (prefers-reduced-motion: reduce) {
+  .live-dot::after {
+    animation: none;
+  }
+  .ping-ring {
+    animation: none;
+    opacity: 0;
+  }
+}
